@@ -1,0 +1,7 @@
+# Device backups and vendor tools (large binaries, kept locally)
+backup/
+
+# Build outputs
+android/out/
+vdec_test/vdec_test
+vdec_test/uvc_vdec_test

@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0d10">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>RV1106 USB Camera</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📹</text></svg>">
+<style>
+  :root{
+    --bg:#0b0d10; --panel:rgba(18,21,26,.82); --line:rgba(255,255,255,.10);
+    --fg:#e8ecf1; --dim:#8b95a3; --accent:#4ea1ff; --ok:#3ddc84; --bad:#ff5c5c;
+    --r:12px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);overflow:hidden;
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",
+         "Noto Sans KR","Malgun Gothic",Roboto,sans-serif;
+    -webkit-user-select:none;user-select:none;
+  }
+
+  /* ---------- 영상 ---------- */
+  #stage{position:fixed;inset:0;display:grid;place-items:center;background:#000}
+  #view,#vid{
+    max-width:100%;max-height:100%;display:block;
+    transform-origin:center center;transition:transform .18s ease;
+  }
+  #vid{width:100%;height:100%;object-fit:contain;background:#000}
+  [hidden]{display:none!important}
+  body.fill #view,body.fill #vid{width:100%;height:100%;object-fit:cover;max-width:none;max-height:none}
+
+  /* ---------- 오버레이 ---------- */
+  #bars{position:fixed;inset:0;pointer-events:none;
+        transition:opacity .25s ease;opacity:1}
+  body.idle #bars{opacity:0}
+  #bars>*{pointer-events:auto}
+
+  .bar{
+    position:fixed;left:0;right:0;display:flex;align-items:center;gap:8px;
+    padding:10px max(12px,env(safe-area-inset-left)) 10px max(12px,env(safe-area-inset-right));
+    background:linear-gradient(to bottom,rgba(0,0,0,.65),rgba(0,0,0,0));
+  }
+  #top{top:0;padding-top:max(10px,env(safe-area-inset-top))}
+  #bottom{
+    bottom:0;top:auto;justify-content:center;flex-wrap:wrap;
+    padding-bottom:max(12px,env(safe-area-inset-bottom));
+    background:linear-gradient(to top,rgba(0,0,0,.7),rgba(0,0,0,0));
+  }
+
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none;
+       box-shadow:0 0 0 0 rgba(61,220,132,.5)}
+  .dot.live{background:var(--ok);animation:pulse 2s infinite}
+  .dot.err{background:var(--bad);animation:none}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(61,220,132,.55)}
+    70%{box-shadow:0 0 0 9px rgba(61,220,132,0)}
+    100%{box-shadow:0 0 0 0 rgba(61,220,132,0)}
+  }
+
+  #title{font-weight:600;letter-spacing:.2px}
+  #meta{margin-left:auto;display:flex;gap:6px;align-items:center;
+        font-variant-numeric:tabular-nums}
+  .chip{
+    background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:4px 10px;font-size:12px;color:var(--dim);backdrop-filter:blur(8px);
+    white-space:nowrap;
+  }
+  .chip b{color:var(--fg);font-weight:600}
+  .chip.warn{color:#ffcf5c;border-color:rgba(255,207,92,.45);cursor:pointer}
+  #c-focus{position:fixed;z-index:5;right:max(12px,env(safe-area-inset-right));
+           top:calc(max(10px,env(safe-area-inset-top)) + 40px);padding:6px 12px}
+  .chip.warn b{color:#ffcf5c}
+
+  button{
+    font:inherit;color:var(--fg);background:var(--panel);
+    border:1px solid var(--line);border-radius:var(--r);
+    padding:10px 14px;min-height:44px;min-width:44px;
+    display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+    backdrop-filter:blur(10px);transition:background .15s,border-color .15s,transform .08s;
+  }
+  button:hover{background:rgba(40,46,56,.9)}
+  button:active{transform:scale(.96)}
+  button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+  button svg{width:19px;height:19px;fill:none;stroke:currentColor;
+             stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  .lbl{font-size:13px}
+  @media (max-width:560px){ .lbl{display:none} button{padding:10px} }
+
+  /* ---------- 상태/오류 ---------- */
+  #msg{
+    position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+    text-align:center;max-width:min(88vw,420px);padding:22px 24px;
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    backdrop-filter:blur(12px);display:none
+  }
+  #msg.show{display:block}
+  #msg h2{margin:0 0 8px;font-size:16px}
+  #msg p{margin:0;color:var(--dim);font-size:13px;white-space:pre-line}
+  .spin{width:30px;height:30px;margin:0 auto 14px;border-radius:50%;
+        border:3px solid rgba(255,255,255,.14);border-top-color:var(--accent);
+        animation:rot .9s linear infinite}
+  @keyframes rot{to{transform:rotate(360deg)}}
+
+  /* ---------- 초점 패널 ---------- */
+  #focus{
+    position:fixed;left:50%;transform:translateX(-50%);
+    bottom:calc(76px + env(safe-area-inset-bottom));
+    width:min(560px,calc(100vw - 24px));
+    display:none;align-items:center;gap:10px;padding:10px 12px;
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    backdrop-filter:blur(12px)
+  }
+  #focus.show{display:flex}
+  #f-auto{flex:none}
+  #f-auto[aria-pressed="true"]{background:rgba(78,161,255,.16)}
+  .fstep{flex:none;padding:10px;font-size:18px;line-height:1}
+  #f-range{flex:1;min-width:0;height:44px;accent-color:var(--accent);margin:0}
+  #focus.auto #f-range{opacity:.55}
+  #f-val{flex:none;min-width:3.2em;text-align:right;font-variant-numeric:tabular-nums;
+         color:var(--dim);font-size:13px}
+  #f-val b{color:var(--fg)}
+  @media (max-width:560px){ #focus{bottom:calc(68px + env(safe-area-inset-bottom))} }
+
+  #toast{
+    position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));
+    transform:translateX(-50%) translateY(14px);
+    background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:9px 16px;font-size:13px;backdrop-filter:blur(10px);
+    opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:9
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <img id="view" alt="카메라 영상">
+  <video id="vid" autoplay playsinline muted hidden></video>
+</div>
+
+<div id="bars">
+  <div class="bar" id="top">
+    <span class="dot" id="dot"></span>
+    <span id="title">RV1106 USB Camera</span>
+    <span id="meta">
+      <span class="chip" id="c-res">—</span>
+      <span class="chip" id="c-fps">—</span>
+      <span class="chip" id="c-mode" style="display:none"></span>
+    </span>
+  </div>
+
+  <div class="bar" id="bottom">
+    <button id="b-play" title="일시정지 / 재생">
+      <svg id="ic-play" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+      <span class="lbl" id="l-play">일시정지</span>
+    </button>
+    <button id="b-snap" title="스냅샷 저장">
+      <svg viewBox="0 0 24 24"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.2a2 2 0 0 0 1.7-.9l.6-.9a2 2 0 0 1 1.7-.9h2.6a2 2 0 0 1 1.7.9l.6.9a2 2 0 0 0 1.7.9h1.2A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/><circle cx="12" cy="13" r="3.6"/></svg>
+      <span class="lbl" id="l-snap">스냅샷</span>
+    </button>
+    <button id="b-audio" aria-pressed="false" title="마이크 소리 켜기/끄기">
+      <svg id="ic-audio" viewBox="0 0 24 24"><path d="M4 9v6h3l5 4V5L7 9z"/><path id="ic-wave" d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>
+      <span class="lbl" id="l-audio">소리</span>
+    </button>
+    <button id="b-focus" aria-pressed="false" title="초점 조절" style="display:none">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M4 8V5a1 1 0 0 1 1-1h3M20 8V5a1 1 0 0 0-1-1h-3M4 16v3a1 1 0 0 0 1 1h3M20 16v3a1 1 0 0 1-1 1h-3"/></svg>
+      <span class="lbl">초점</span>
+    </button>
+    <button id="b-fit" aria-pressed="false" title="화면 맞춤 / 꽉 채우기">
+      <svg viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4"/></svg>
+      <span class="lbl">꽉 채우기</span>
+    </button>
+    <button id="b-rot" title="90° 회전">
+      <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 1 2.6 5.9"/><path d="M4 8v4h4"/></svg>
+      <span class="lbl">회전</span>
+    </button>
+    <button id="b-full" title="전체화면">
+      <svg id="ic-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      <span class="lbl">전체화면</span>
+    </button>
+  </div>
+
+  <div id="focus">
+    <button id="f-auto" aria-pressed="true" title="자동초점 켜기/끄기">자동</button>
+    <button class="fstep" id="f-minus" title="초점 값 낮추기">−</button>
+    <input type="range" id="f-range" min="1" max="1023" step="1" value="1" aria-label="초점 위치">
+    <button class="fstep" id="f-plus" title="초점 값 높이기">+</button>
+    <span id="f-val"><b>—</b></span>
+  </div>
+</div>
+
+<!-- 수동 초점 표시: 컨트롤이 숨겨져도 항상 보이도록 #bars 밖에 둔다 -->
+<span class="chip warn" id="c-focus" style="display:none" title="수동 초점 – 눌러서 초점 패널 열기"></span>
+
+<div id="msg"><div class="spin"></div><h2 id="msg-t">카메라 연결 중…</h2><p id="msg-p"></p></div>
+<div id="toast"></div>
+<audio id="snd" style="display:none"></audio>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const view = $("view"), vid = $("vid"), dot = $("dot"), snd = $("snd");
+
+let paused = false, rot = 0, retry = 0, retryTimer = null, audioOn = false;
+/* mode: "webrtc" = H.264 (보드 하드웨어 인코더), "mjpeg" = multipart 스트림,
+   "poll" = 스냅샷 폴링(호환 모드).
+   WebRTC 가 안 되면 MJPEG 으로, MJPEG 도 5초 안에 첫 프레임이 안 오면
+   (iOS Safari 등) 호환 모드로 자동으로 내려간다. */
+let mode = null, gotFrame = false, watchdog = null;
+let rtc = null, rtcDC = null, rtcGen = 0, rtcFails = 0;
+const RTC_OK = "RTCPeerConnection" in window;
+
+function setChip(html){
+  const c = $("c-mode");
+  c.style.display = html ? "" : "none"; c.innerHTML = html || "";
+}
+function showVideo(isVid){
+  vid.hidden = !isVid; view.hidden = isVid;
+  if (isVid) view.removeAttribute("src");
+}
+
+/* ---------------- WebRTC ---------------- */
+function stopRTC(){
+  rtcGen++;
+  if (rtc){ try{ rtc.close(); }catch(e){} }
+  rtc = null; rtcDC = null;
+  vid.srcObject = null;
+}
+
+function iceDone(pc, ms){
+  return new Promise(res => {
+    if (pc.iceGatheringState === "complete") return res();
+    const t = setTimeout(res, ms);
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete"){ clearTimeout(t); res(); }
+    });
+  });
+}
+
+async function startRTC(){
+  stopRTC();
+  const gen = rtcGen;
+  showVideo(true);
+  watchdog = setTimeout(() => {
+    if (!gotFrame && !paused && gen === rtcGen) rtcFailed("영상이 오지 않습니다");
+  }, 8000);
+  try{
+    const pc = new RTCPeerConnection({iceServers: []});
+    rtc = pc;
+    pc.addTransceiver("video", {direction: "recvonly"});
+    const dc = pc.createDataChannel("snap");
+    dc.binaryType = "arraybuffer"; dc.onmessage = onPhotoMsg;
+    rtcDC = dc;
+    pc.ontrack = e => {
+      vid.srcObject = e.streams[0] || new MediaStream([e.track]);
+      vid.play().catch(() => {});
+    };
+    pc.onconnectionstatechange = () => {
+      if (gen !== rtcGen || paused) return;
+      const s = pc.connectionState;
+      if (s === "failed" || s === "closed") rtcLost();
+      else if (s === "disconnected") setTimeout(() => {
+        if (gen === rtcGen && pc.connectionState === "disconnected") rtcLost();
+      }, 4000);
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await iceDone(pc, 1500);
+    const r = await fetch("/webrtc", {method: "POST", cache: "no-store",
+      headers: {"Content-Type": "application/sdp"}, body: pc.localDescription.sdp});
+    const body = await r.text();
+    if (!r.ok) throw new Error(body.trim() || ("HTTP " + r.status));
+    if (gen !== rtcGen) return;
+    await pc.setRemoteDescription({type: "answer", sdp: body});
+  }catch(e){
+    if (gen === rtcGen) rtcFailed(e.message);
+  }
+}
+
+/* 연결이 한 번도 안 되면 MJPEG 으로 내려가고, 잘 되다가 끊긴 거면 WebRTC 로 다시 붙는다 */
+function rtcFailed(why){
+  console.warn("WebRTC:", why);
+  if (++rtcFails >= 2 || !gotFrame){
+    stopRTC();
+    mode = "mjpeg"; setChip("<b>MJPEG</b>");
+    toast("WebRTC 연결 실패 → MJPEG");
+    connect();
+  } else rtcLost();
+}
+function rtcLost(){
+  dot.className = "dot err";
+  retry++;
+  const wait = Math.min(1000 * retry, 8000);
+  showMsg("스트림이 끊겼습니다", "재연결 시도 " + retry + "회 … (" + (wait/1000) + "초 후)", true);
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(connect, wait);
+}
+
+vid.addEventListener("playing", () => {
+  if (mode !== "webrtc") return;
+  gotFrame = true; retry = 0; rtcFails = 0; hideMsg(); dot.className = "dot live";
+  clearTimeout(watchdog);
+});
+
+/* 수신 비트레이트를 칩에 표시 (MJPEG 대비 얼마나 줄었는지 보이게) */
+let lastBytes = 0, lastT = 0;
+async function rtcRate(){
+  if (!rtc || mode !== "webrtc") return;
+  try{
+    const st = await rtc.getStats();
+    st.forEach(r => {
+      if (r.type === "inbound-rtp" && r.kind === "video"){
+        const now = r.timestamp, b = r.bytesReceived;
+        if (lastT && now > lastT){
+          const mbps = (b - lastBytes) * 8 / ((now - lastT) / 1000) / 1e6;
+          setChip("<b>WebRTC</b> " + mbps.toFixed(1) + " Mbps");
+        }
+        lastBytes = b; lastT = now;
+      }
+    });
+  }catch(e){}
+}
+
+/* ---------------- toast ---------------- */
+let toastTimer;
+function toast(text){
+  const t = $("toast");
+  t.textContent = text; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+/* ---------------- 상태 메시지 ---------------- */
+function showMsg(title, body, spinning){
+  $("msg-t").textContent = title;
+  $("msg-p").textContent = body || "";
+  $("msg").querySelector(".spin").style.display = spinning ? "" : "none";
+  $("msg").classList.add("show");
+}
+function hideMsg(){ $("msg").classList.remove("show"); }
+
+/* ---------------- 스트림 연결 ---------------- */
+function connect(){
+  clearTimeout(retryTimer); clearTimeout(watchdog);
+  gotFrame = false;
+  if (mode === "webrtc"){ lastT = 0; startRTC(); return; }
+  stopRTC(); showVideo(false);
+  if (mode === "mjpeg"){
+    view.src = "/stream.mjpg?t=" + Date.now();
+    watchdog = setTimeout(() => {
+      if (!gotFrame && !paused){
+        mode = "poll";
+        const c = $("c-mode");
+        c.style.display = ""; c.innerHTML = "<b>호환</b> 모드";
+        toast("호환 모드로 전환");
+        pollFrame();
+      }
+    }, 5000);
+  } else {
+    pollFrame();
+  }
+}
+
+function pollFrame(){
+  if (paused || mode !== "poll") return;
+  view.src = "/snapshot.jpg?t=" + Date.now();
+}
+
+view.addEventListener("load", () => {           // 프레임 도착
+  if (mode === "webrtc") return;
+  gotFrame = true; retry = 0; hideMsg(); dot.className = "dot live";
+  if (mode === "poll") setTimeout(pollFrame, 90);   // 약 11 fps
+});
+view.addEventListener("error", () => {
+  if (paused || mode === "webrtc") return;
+  dot.className = "dot err";
+  retry++;
+  if (mode === "poll"){                          // 호환 모드는 조용히 재시도
+    retryTimer = setTimeout(pollFrame, Math.min(500 * retry, 4000));
+    return;
+  }
+  const wait = Math.min(1000 * retry, 8000);
+  showMsg("스트림이 끊겼습니다", "재연결 시도 " + retry + "회 … (" + (wait/1000) + "초 후)", true);
+  retryTimer = setTimeout(connect, wait);
+});
+
+/* ---------------- 상태 폴링 ---------------- */
+let lastFrames = -1, stale = 0;
+async function poll(){
+  try{
+    const r = await fetch("/status.json", {cache:"no-store"});
+    const s = await r.json();
+    $("c-res").innerHTML = "<b>" + s.width + "×" + s.height + "</b> " + s.pixfmt;
+    $("c-fps").innerHTML = "<b>" + s.fps.toFixed(1) + "</b> fps"
+      + (s.clients > 1 ? " · " + s.clients + "명" : "");
+    if (s.card) $("title").textContent = s.card;
+    $("b-audio").style.display = s.audio ? "" : "none";
+    photoRes = s.photo || null;
+    if (s.focus && !fbusy && !fdrag){       // 다른 패드에서 바꾼 것도 반영
+      if (fst){ fst.auto = s.focus.auto; fst.value = s.focus.value; renderFocus(); }
+      else focusChip(s.focus.auto, s.focus.value);
+    }
+    $("b-snap").title = photoRes ? "스냅샷 (" + photoRes + ")" : "스냅샷 저장";
+
+    if (!paused){
+      if (s.frames === lastFrames){            // 캡처가 멈춤
+        if (++stale >= 3){
+          dot.className = "dot err";
+          showMsg("카메라에서 프레임이 오지 않습니다",
+                  "USB 연결을 확인하거나 보드에서 서비스를 재시작하세요.", false);
+        }
+      } else { stale = 0; }
+      lastFrames = s.frames;
+    }
+  }catch(e){
+    dot.className = "dot err";
+  }
+}
+setInterval(() => { poll(); rtcRate(); }, 2000);
+
+/* ---------------- 버튼 ---------------- */
+$("b-play").onclick = () => {
+  paused = !paused;
+  if (paused){
+    clearTimeout(watchdog); clearTimeout(retryTimer);
+    if (mode === "webrtc"){ stopRTC(); showVideo(false); }   // 대역폭을 완전히 끊는다
+    view.src = "/snapshot.jpg?t=" + Date.now();   // 마지막 화면 정지 표시
+    dot.className = "dot";
+    $("ic-play").innerHTML = '<path d="M7 4.5v15l13-7.5z"/>';
+    $("l-play").textContent = "재생";
+    toast("일시정지");
+  } else {
+    $("ic-play").innerHTML =
+      '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>';
+    $("l-play").textContent = "일시정지";
+    showMsg("다시 연결 중…", "", true);
+    connect(); toast("재생");
+  }
+};
+
+function download(href, name){
+  const a = document.createElement("a");
+  a.href = href; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+/* WebRTC 데이터 채널 사진 수신:
+   {"type":"photo", name, width, height, bytes} -> JPEG 조각들 -> {"type":"photo-end"} */
+let photoRx = null;
+function onPhotoMsg(ev){
+  const rx = photoRx;
+  if (!rx) return;
+  if (typeof ev.data === "string"){
+    let m; try{ m = JSON.parse(ev.data); }catch(e){ return; }
+    if (m.type === "photo"){ rx.meta = m; rx.parts = []; rx.got = 0; }
+    else if (m.type === "photo-end" && rx.meta){
+      photoRx = null;
+      if (rx.got !== rx.meta.bytes) rx.reject(new Error("수신 크기 불일치 " + rx.got + "/" + rx.meta.bytes));
+      else rx.resolve({meta: rx.meta, blob: new Blob(rx.parts, {type: "image/jpeg"})});
+    }
+    else if (m.type === "photo-error"){ photoRx = null; rx.reject(new Error(m.error)); }
+  } else if (rx.meta){
+    rx.parts.push(ev.data); rx.got += ev.data.byteLength;
+    $("l-snap").textContent = Math.round(100 * rx.got / rx.meta.bytes) + "%";
+  }
+}
+function photoViaRTC(){
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { photoRx = null; reject(new Error("시간 초과")); }, 25000);
+    photoRx = {meta: null,
+               resolve: v => { clearTimeout(t); resolve(v); },
+               reject: e => { clearTimeout(t); reject(e); }};
+    rtcDC.send(JSON.stringify({type: "photo"}));
+  });
+}
+/* 앱(RV1106 USB)에서는 앱이 직접 사진 폴더에 저장, 브라우저에서는 다운로드 */
+function saveBlob(blob, name){
+  if (window.UsbCamApp && UsbCamApp.savePhoto){
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => {
+        const b64 = String(fr.result).split(",")[1];
+        const err = UsbCamApp.savePhoto(name, b64);
+        err ? reject(new Error(err)) : resolve();
+      };
+      fr.onerror = () => reject(new Error("읽기 실패"));
+      fr.readAsDataURL(blob);
+    });
+  }
+  const url = URL.createObjectURL(blob);
+  download(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return Promise.resolve();
+}
+
+/* 스냅샷: 보드가 최대 해상도(16MP)로 1장 찍어서 준다. 그동안 영상이 1~2초 멈춘다.
+   고해상도 촬영을 지원하지 않으면 지금 화면(스트림 해상도)을 저장한다. */
+let photoRes = null, shooting = false;
+$("b-snap").onclick = async () => {
+  if (shooting) return;
+  if (!photoRes){
+    const ts = new Date().toISOString().replace(/[:.]/g,"-").slice(0,19);
+    download("/snapshot.jpg?t=" + Date.now(), "UsbCam_" + ts + ".jpg");
+    toast("스냅샷 저장");
+    return;
+  }
+  shooting = true;
+  $("b-snap").disabled = true;
+  $("l-snap").textContent = "촬영 중…";
+  toast(photoRes + " 촬영 중…");
+  try{
+    if (rtcDC && rtcDC.readyState === "open"){
+      const p = await photoViaRTC();          // WebRTC 데이터 채널로 받기
+      await saveBlob(p.blob, p.meta.name);
+      toast(p.meta.width + "×" + p.meta.height + " 저장 (" + Math.round(p.meta.bytes/1024) + " KB, WebRTC)");
+    } else {
+      const r = await fetch("/photo", {method:"POST", cache:"no-store"});
+      const p = await r.json();
+      if (!r.ok) throw new Error(p.error || r.status);
+      download(p.url, p.filename);
+      toast(p.width + "×" + p.height + " 저장 (" + Math.round(p.bytes/1024) + " KB)");
+    }
+  }catch(e){
+    toast("촬영 실패: " + e.message);
+  }finally{
+    shooting = false;
+    $("b-snap").disabled = false;
+    $("l-snap").textContent = "스냅샷";
+  }
+};
+
+$("b-audio").onclick = () => {
+  audioOn = !audioOn;
+  $("b-audio").setAttribute("aria-pressed", String(audioOn));
+  if (audioOn){
+    snd.src = "/audio.wav?t=" + Date.now();
+    snd.play().then(() => toast("소리 켜짐")).catch(err => {
+      audioOn = false;
+      $("b-audio").setAttribute("aria-pressed","false");
+      toast("소리를 재생할 수 없습니다");
+    });
+    $("ic-wave").setAttribute("d","M16.5 8.5a5 5 0 0 1 0 7");
+  } else {
+    snd.pause(); snd.removeAttribute("src"); snd.load();
+    $("ic-wave").setAttribute("d","M16.5 9.5l5 5m0-5l-5 5");
+    toast("소리 꺼짐");
+  }
+};
+
+$("b-fit").onclick = () => {
+  const fill = document.body.classList.toggle("fill");
+  $("b-fit").setAttribute("aria-pressed", String(fill));
+  toast(fill ? "꽉 채우기" : "화면 맞춤");
+};
+
+$("b-rot").onclick = () => {
+  rot = (rot + 90) % 360;
+  view.style.transform = vid.style.transform = "rotate(" + rot + "deg)";
+  toast(rot + "°");
+};
+
+$("b-full").onclick = async () => {
+  try{
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen({navigationUI:"hide"});
+  }catch(e){ toast("전체화면을 지원하지 않는 브라우저입니다"); }
+};
+document.addEventListener("fullscreenchange", () => {
+  $("ic-full").innerHTML = document.fullscreenElement
+    ? '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>'
+    : '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>';
+});
+
+/* ---------------- 초점 ---------------- */
+const fpanel = $("focus"), frange = $("f-range");
+let fst = null, fbusy = false, fdrag = false, fsendTimer = null;
+
+function renderFocus(){
+  if (!fst || !fst.available) return;
+  frange.min = fst.min; frange.max = fst.max; frange.step = fst.step;
+  if (!fdrag) frange.value = fst.value;
+  /* 이 카메라(A298)는 자동초점 중 렌즈 위치를 focus_absolute 로 알려주지 않는다.
+     자동일 때 숫자를 보여주면 실제와 다르므로 "자동" 으로만 표시한다. */
+  $("f-val").innerHTML = fst.auto && !fdrag ? "<b>자동</b>"
+                       : "<b>" + (fdrag ? frange.value : fst.value) + "</b>";
+  $("f-auto").setAttribute("aria-pressed", String(fst.auto));
+  $("f-auto").style.display = fst.has_auto ? "" : "none";
+  fpanel.classList.toggle("auto", fst.auto);
+  focusChip(fst.auto, fst.value);
+}
+
+/* 수동 초점일 때 오른쪽 위에 노란 칩을 띄운다 (자동초점이 꺼진 걸 모르고 지나치지 않게).
+   컨트롤이 자동으로 숨겨져도 이 칩은 계속 보인다. */
+function focusChip(auto, value){
+  const c = $("c-focus");
+  if (auto){ c.style.display = "none"; return; }
+  c.style.display = "";
+  c.innerHTML = "<b>수동 초점</b> " + value;
+}
+$("c-focus").onclick = () => {
+  if (!fpanel.classList.contains("show")) $("b-focus").click();
+};
+
+async function loadFocus(){
+  try{
+    const r = await fetch("/focus.json", {cache:"no-store"});
+    const s = await r.json();
+    $("b-focus").style.display = s.available ? "" : "none";
+    if (s.available && !fbusy){ fst = s; renderFocus(); }
+  }catch(e){}
+}
+
+async function sendFocus(body){
+  fbusy = true;
+  try{
+    const r = await fetch("/focus", {method:"POST", cache:"no-store",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const s = await r.json();
+    if (!r.ok) throw new Error(s.error || r.status);
+    fst = s; renderFocus();
+    return true;
+  }catch(e){
+    toast("초점 설정 실패: " + e.message);
+    return false;
+  }finally{ fbusy = false; }
+}
+
+$("b-focus").onclick = () => {
+  const open = fpanel.classList.toggle("show");
+  $("b-focus").setAttribute("aria-pressed", String(open));
+  if (open) loadFocus();
+};
+
+$("f-auto").onclick = async () => {
+  if (!fst) return;
+  const want = !fst.auto;
+  if (await sendFocus({auto: want})) toast(want ? "자동초점 켜짐" : "수동 초점");
+};
+
+/* 슬라이더: 끄는 동안 값만 보여주고, 250ms 간격으로 카메라에 반영 (렌즈 모터를 너무 자주 움직이지 않게) */
+frange.addEventListener("input", () => {
+  fdrag = true;
+  $("f-val").innerHTML = "<b>" + frange.value + "</b>";
+  if (fst && fst.auto){ fst.auto = false; fpanel.classList.remove("auto");
+                        $("f-auto").setAttribute("aria-pressed","false"); }
+  clearTimeout(fsendTimer);
+  fsendTimer = setTimeout(() => sendFocus({value: +frange.value}), 250);
+});
+frange.addEventListener("change", () => {
+  fdrag = false;
+  clearTimeout(fsendTimer);
+  sendFocus({value: +frange.value});
+});
+
+function stepFocus(dir){
+  if (!fst) return;
+  const step = Math.max(fst.step, Math.round((fst.max - fst.min) / 100));
+  const v = Math.min(fst.max, Math.max(fst.min, fst.value + dir * step));
+  sendFocus({value: v});
+}
+$("f-minus").onclick = () => stepFocus(-1);
+$("f-plus").onclick = () => stepFocus(+1);
+
+loadFocus();
+
+/* ---------------- 컨트롤 자동 숨김 ---------------- */
+let idleTimer;
+function wake(){
+  document.body.classList.remove("idle");
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => document.body.classList.add("idle"), 3500);
+}
+["pointerdown","pointermove","keydown","touchstart"].forEach(
+  ev => document.addEventListener(ev, wake, {passive:true}));
+wake();
+
+/* 탭이 다시 보이면 스트림을 새로 붙인다 (모바일에서 백그라운드 후 멈추는 문제) */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !paused) connect();
+});
+
+/* 키보드 단축키 */
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); $("b-play").click(); }
+  else if (k === "f") $("b-full").click();
+  else if (k === "s") $("b-snap").click();
+  else if (k === "r") $("b-rot").click();
+  else if (k === "m") $("b-audio").click();
+  else if (k === "a" && fst) $("f-auto").click();
+  else if (k === "[" ) stepFocus(-1);
+  else if (k === "]" ) stepFocus(+1);
+});
+
+/* 시작: 보드가 WebRTC 를 켜뒀고 브라우저도 지원하면 WebRTC, 아니면 MJPEG */
+showMsg("카메라 연결 중…", "", true);
+(async () => {
+  let s = null;
+  try{ s = await (await fetch("/status.json", {cache: "no-store"})).json(); }catch(e){}
+  mode = (RTC_OK && s && s.webrtc) ? "webrtc" : "mjpeg";
+  if (mode === "mjpeg") setChip("<b>MJPEG</b>");
+  poll();
+  connect();
+})();
+</script>
+</body>
+</html>

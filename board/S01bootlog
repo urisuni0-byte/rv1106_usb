@@ -1,0 +1,42 @@
+#!/bin/sh
+# 보드가 갑자기 꺼지거나 재부팅되는 원인 추적용 로거.
+#   /userdata/bootlog/boot_<부팅번호>.log 에 2초마다 uptime / 여유 메모리 / SoC 온도 / 새 커널 로그를 남긴다.
+#   최근 5회 부팅분만 보관. 마지막 줄이 꺼지기 직전 상태다.
+# 설치: /etc/init.d/S01bootlog  (제거하려면 파일만 지우면 된다)
+DIR=/userdata/bootlog
+KEEP=5
+
+run() {
+    # /userdata 마운트 대기
+    i=0
+    while [ $i -lt 30 ] && ! mount | grep -q " /userdata "; do sleep 1; i=$((i + 1)); done
+    mkdir -p $DIR
+    n=$(($(cat $DIR/count 2>/dev/null || echo 0) + 1))
+    echo $n >$DIR/count
+    f=$DIR/boot_$(printf %04d $n).log
+    old=$(ls -1 $DIR/boot_*.log 2>/dev/null | sort -r | tail -n +$KEEP)
+    [ -n "$old" ] && rm -f $old
+    last=0
+    while true; do
+        t=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        echo "== up $(cut -d' ' -f1 /proc/uptime) free $(awk '/MemAvailable/{print $2}' /proc/meminfo)kB temp ${t:-?} load $(cut -d' ' -f1 /proc/loadavg)" >>$f
+        # 마지막으로 본 뒤에 새로 생긴 커널 로그만
+        dmesg | awk -v last="$last" -F'[][]' '{ts=$2+0} ts>last' >>$f
+        last=$(dmesg | tail -1 | sed 's/^\[ *\([0-9.]*\)\].*/\1/')
+        sync
+        sleep 2
+    done
+}
+
+case "$1" in
+start)
+    start-stop-daemon -S -b -m -p /var/run/bootlog.pid -x /bin/sh -- "$0" run
+    ;;
+stop)
+    start-stop-daemon -K -q -p /var/run/bootlog.pid
+    ;;
+run)
+    run
+    ;;
+esac
+exit 0

@@ -1,0 +1,46 @@
+#!/bin/sh
+# UVC 테스트용 host 모드 부팅 처리 (/etc/init.d/S99zuvctest, S99luckfoxconfigload 다음에 실행)
+#
+# DT 가 host 로 부팅되면 플래그와 무관하게 항상 peripheral 로 복구한다.
+#   - 전원이 끊겨 재부팅돼도 다음 부팅에서 다시 복구 경로를 탐
+#   - 첫 host 부팅에서만 카메라 테스트, 이후(ATTEMPT>=2)는 테스트 없이 즉시 복구
+#   - 복구 쓰기가 실패하면 재부팅하지 않음 (재부팅 루프 방지, Wi-Fi/UART 로 접근 가능하게 유지)
+DIR=/userdata/uvc_test
+LOG=$DIR/uvc_result.log
+CNT=$DIR/host_boot_count
+
+case "$1" in
+start)
+    [ "$(tr -d '\0' </proc/device-tree/usbdrd/usb@ffb00000/dr_mode)" = "host" ] || exit 0
+    n=$(($(cat $CNT 2>/dev/null || echo 0) + 1))
+    echo $n >$CNT
+    sync
+    (
+        sleep 10
+        cd $DIR
+        if [ $n -le 1 ]; then
+            SKIP_SWITCH=1 OUT=$DIR sh $DIR/uvc_auto.sh # LOG 를 새로 씀
+        else
+            echo "=== host boot #$n $(date): skip test, restore only ===" >>$LOG
+        fi
+        echo "=== restore USB peripheral (host boot #$n) $(date) ===" >>$LOG
+        bash $DIR/usbmode.sh peripheral >$DIR/usbmode.log 2>&1
+        result=$(grep 'boot DTB dr_mode' $DIR/usbmode.log | tail -1)
+        echo "$result" >>$LOG
+        sync
+        case "$result" in
+        *peripheral*)
+            rm -f $CNT
+            sync
+            sleep 2
+            reboot
+            ;;
+        *)
+            echo "!!! restore failed, NOT rebooting" >>$LOG
+            sync
+            ;;
+        esac
+    ) </dev/null >/dev/null 2>&1 &
+    ;;
+esac
+exit 0
