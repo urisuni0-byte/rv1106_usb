@@ -1,0 +1,56 @@
+// Luckfox Pico Ultra W: IMX219 (2-lane) 를 MIPI0 카메라 단자(i2c4)에 추가하는 런타임 오버레이
+// 보드 DTB 에 __symbols__ 가 없어서 target-path 와 숫자 phandle 을 쓴다.
+// 숫자는 같은 단자의 sc3336@30 노드와 같은 값이다 (보드 DTB 에서 확인).
+//   0x02 = cru, 0xa5 = MCLK_REF_MIPI0, 0x40 = gpio3, 0x15 = RK_PC5, 0x41 = mipi_refclk_out0
+// 적용: mkdir /sys/kernel/config/device-tree/overlays/imx219
+//       cat imx219.dtbo > /sys/kernel/config/device-tree/overlays/imx219/dtbo
+// VCM(0x0c)은 노드를 만들지 않는다. AF 는 사용자 공간에서 /dev/i2c-4 로 직접 구동한다.
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/i2c@ff470000";
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			imx219@10 {
+				compatible = "sony,imx219";
+				status = "okay";
+				reg = <0x10>;
+				clocks = <0x02 0xa5>;
+				clock-names = "xvclk";
+				/* 파이 카메라 모듈의 CAM_GPIO(전원/XCLR enable)에 연결 */
+				reset-gpios = <0x40 0x15 0>;
+				pinctrl-names = "default";
+				pinctrl-0 = <0x41>;
+				rockchip,camera-module-index = <0>;
+				rockchip,camera-module-facing = "back";
+				rockchip,camera-module-name = "RPI-CAM-AF";
+				rockchip,camera-module-lens-name = "DEFAULT";
+
+				port {
+					imx219_out: endpoint {
+						remote-endpoint = <&csi_dphy_input2>;
+						data-lanes = <1 2>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@1 {
+		target-path = "/csi2-dphy0/ports/port@0";
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			csi_dphy_input2: endpoint@2 {
+				reg = <2>;
+				remote-endpoint = <&imx219_out>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};

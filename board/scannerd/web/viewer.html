@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TGO-ABC 스캐너</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #0d1117; --panel: rgba(13,17,23,.82); --line: #2b3440;
+    --text: #e8ecf1; --muted: #9aa6b2; --accent: #4fb3a9; --uv: #8b6cf0;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .bar { position: fixed; left: 0; right: 0; display: flex; align-items: center; gap: 10px; padding: 10px 16px; }
+  #top { top: 0; background: linear-gradient(var(--panel), transparent); }
+  #bottom { bottom: 0; justify-content: center; padding-bottom: max(18px, env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, var(--panel)); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+    background: rgba(255,255,255,.08); color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .pill[hidden] { display: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  #name { font-weight: 600; }
+  .spacer { flex: 1; }
+  button { font: inherit; color: var(--text); background: rgba(255,255,255,.1); border: 1px solid var(--line);
+    border-radius: 12px; padding: 10px 16px; min-height: 44px; }
+  button:active { background: rgba(255,255,255,.2); }
+  button:disabled { opacity: .45; }
+  #shoot { width: 72px; height: 72px; border-radius: 50%; padding: 0; border: 4px solid #fff;
+    background: var(--accent); font-weight: 700; font-size: 14px; }
+  @media (max-width: 420px) { .bar button:not(#shoot) { padding: 8px 10px; font-size: 14px; } #bottom { gap: 6px; } }
+  #msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); text-align: center;
+    color: var(--muted); padding: 16px 20px; border-radius: 14px; background: var(--panel); max-width: 80vw; }
+  #msg:empty { display: none; }
+  #steps { position: fixed; left: 50%; top: 64px; transform: translateX(-50%); display: none; gap: 6px; }
+  #steps.on { display: flex; }
+  .step { padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,.08); color: var(--muted); font-size: 13px; }
+  .step.now { background: var(--accent); color: #04110f; }
+  .step.done { color: var(--text); }
+  #result { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.86); display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; padding: 16px; }
+  #result.on { display: flex; }
+  #shots { display: grid; grid-template-columns: repeat(var(--n, 2), minmax(0, 1fr)); gap: 12px; width: min(960px, 100%); }
+  #shots.one { width: min(720px, 100%); }
+  figure { margin: 0; background: #111; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  figure img { display: block; width: 100%; aspect-ratio: 4/3; object-fit: cover; background: #222; }
+  figcaption { padding: 6px 10px; font-size: 13px; color: var(--muted); }
+  figcaption b { color: var(--text); }
+  #climate { display: flex; gap: 24px; font-size: 18px; }
+  #climate span { color: var(--muted); font-size: 13px; display: block; }
+  .note { color: var(--muted); font-size: 12px; }
+
+  /* 카메라 설정 패널 */
+  #cam { position: fixed; z-index: 5; top: 0; right: 0; bottom: 0; width: min(380px, 100%);
+    display: flex; flex-direction: column; background: rgba(13,17,23,.95); border-left: 1px solid var(--line);
+    transform: translateX(100%); transition: transform .2s ease; visibility: hidden; }
+  #cam.on { transform: none; visibility: visible; }
+  @media (min-width: 760px) {
+    body.camopen #stage, body.camopen #top, body.camopen #bottom { right: 380px; }
+    body.camopen #steps, body.camopen #msg { left: calc(50% - 190px); }
+  }
+  @media (max-width: 759px) and (orientation: portrait) {
+    #cam { top: auto; width: 100%; height: 62vh; border-left: 0; border-top: 1px solid var(--line);
+      border-radius: 16px 16px 0 0; transform: translateY(100%); }
+    body.camopen #stage { bottom: 62vh; }
+    body.camopen #bottom { visibility: hidden; }
+  }
+  .cam-h { display: flex; align-items: center; gap: 8px; padding: 12px 12px 12px 16px; border-bottom: 1px solid var(--line); }
+  .cam-h b { flex: 1; font-size: 16px; }
+  .cam-h button, .cam-f button { min-height: 40px; padding: 8px 14px; }
+  #camBody { flex: 1; overflow-y: auto; padding: 4px 16px 16px; overscroll-behavior: contain; }
+  .cam-f { display: flex; gap: 8px; padding: 10px 16px max(12px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+  .cam-f .note { flex: 1; align-self: center; }
+  .grp { margin-top: 14px; }
+  .grp > h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--accent); }
+  .ctl { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+  .ctl:last-child { border-bottom: 0; }
+  .ctl-h { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+  .ctl-n { flex: 1; }
+  .ctl-v { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+  .ctl-r { min-height: 28px; padding: 2px 8px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+  .ctl-hint { display: none; color: var(--warn); font-size: 12px; }
+  .ctl.off .ctl-hint { display: inline; }
+  .ctl.off .ctl-n, .ctl.off .ctl-v { opacity: .5; }
+  .ctl input[type=range] { width: 100%; height: 32px; margin: 2px 0 0; accent-color: var(--accent); }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .seg button { flex: 1; min-height: 36px; padding: 6px 10px; font-size: 14px; border-radius: 10px; }
+  .seg button.sel { background: var(--accent); color: #04110f; border-color: var(--accent); font-weight: 600; }
+  .sw { position: relative; width: 50px; height: 30px; flex: none; }
+  .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .sw span { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,.16); transition: background .15s; pointer-events: none; }
+  .sw span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .sw input:checked + span { background: var(--accent); }
+  .sw input:checked + span::after { transform: translateX(20px); }
+  .sw input:disabled + span { opacity: .4; }
+  #camMsg { color: var(--muted); padding: 24px 0; text-align: center; }
+  #camMsg:empty { display: none; }
+
+  /* 초점 맞춤 보조 */
+  #top #focBtn { min-height: 32px; padding: 4px 12px; font-size: 13px; border-radius: 999px; }
+  #focBtn.on { background: var(--accent); color: #04110f; border-color: var(--accent); font-weight: 600; }
+  #roi { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); display: none;
+    border: 2px dashed rgba(255,255,255,.75); border-radius: 6px; pointer-events: none; transition: border-color .2s; }
+  #roi.best { border-color: var(--ok); border-style: solid; }
+  body.focus #roi { display: block; }
+  #foc { position: fixed; z-index: 4; left: 50%; bottom: 112px; transform: translateX(-50%); width: min(440px, calc(100vw - 32px));
+    display: none; padding: 12px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
+  body.focus #foc { display: block; }
+  .foc-h { display: flex; align-items: center; gap: 8px; }
+  .foc-h b { flex: 1; font-size: 14px; }
+  .foc-h button { min-height: 32px; padding: 4px 10px; font-size: 13px; border-radius: 8px; }
+  #focBar { position: relative; height: 14px; margin: 10px 0 6px; border-radius: 7px; background: rgba(255,255,255,.1); overflow: hidden; }
+  #focFill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--warn); transition: width .15s, background .2s; }
+  #focFill.best { background: var(--ok); }
+  #focNum { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #focNum b { color: var(--text); font-size: 15px; }
+  #focGraph { display: block; width: 100%; height: 44px; margin-top: 8px; }
+  #focHint { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  #focHint.warn { color: var(--warn); }
+  @media (min-width: 760px) { body.camopen #foc { left: calc(50% - 190px); } }
+  @media (max-width: 759px) and (orientation: portrait) { body.camopen #foc { bottom: calc(62vh + 12px); } }
+</style>
+</head>
+<body>
+<div id="stage"><video id="v" autoplay playsinline muted></video><div id="roi"></div></div>
+
+<div id="top" class="bar">
+  <span class="pill"><span id="cdot" class="dot"></span><span id="name">스캐너</span></span>
+  <span class="pill" id="vinfo">미리보기 대기</span>
+  <span class="pill" id="afinfo" hidden><span id="afdot" class="dot"></span><span id="aftext"></span></span>
+  <span class="pill" id="wbinfo" hidden></span>
+  <span class="spacer"></span>
+  <span class="pill" id="capstate">촬영 준비 중</span>
+  <button id="focBtn" title="렌즈 초점 맞춤 보조">초점</button>
+</div>
+<div id="steps"><span class="step" data-s="white">일반광</span><span class="step" data-s="uv">UV광</span><span class="step" data-s="climate">온·습도</span><span class="step" data-s="save">저장</span></div>
+<div id="msg">장치에 연결하는 중…</div>
+
+<div id="bottom" class="bar">
+  <button id="pv">미리보기 중지</button>
+  <button id="camBtn">카메라</button>
+  <button id="shoot" title="물리 버튼과 같은 촬영">촬영</button>
+  <button id="last">최근 촬영</button>
+</div>
+
+<div id="foc" aria-label="초점 맞춤 보조">
+  <div class="foc-h"><b>초점 맞춤</b><button id="focReset" title="최고값을 지우고 다시 찾기">최고값 지우기</button></div>
+  <div id="focBar"><div id="focFill"></div></div>
+  <div id="focNum"><span>현재 <b id="focCur">-</b></span><span id="focPct"></span><span>최고 <b id="focMax">-</b></span></div>
+  <canvas id="focGraph"></canvas>
+  <div id="focHint">점선 안에 대상을 두고 렌즈를 천천히 돌리세요. 막대가 가장 길어지는(초록) 곳이 초점입니다.</div>
+</div>
+
+<aside id="cam" aria-label="카메라 설정">
+  <div class="cam-h"><b>카메라 설정</b><button id="camReload" title="다시 읽기">새로고침</button><button id="camClose">닫기</button></div>
+  <div id="camBody"><div id="camMsg"></div></div>
+  <div class="cam-f"><span class="note" id="camNote">바꾼 값은 장치에 저장됩니다</span><button id="camReset">기본값으로</button></div>
+</aside>
+
+<div id="result">
+  <div id="climate"></div>
+  <div id="shots"></div>
+  <div class="note" id="rnote"></div>
+  <button id="close">닫기</button>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  // 앱은 loadDataWithBaseURL("http://<장치>:<포트>/") 로 띄우고, 장치도 / 로 같은 파일을 준다.
+  const BASE = location.origin.startsWith('http') ? location.origin : '';
+  const bridge = window.Android || null;
+  const $ = id => document.getElementById(id);
+  const video = $('v');
+
+  let pc = null, dc = null, sid = null, reqNo = 0, wantPreview = true;
+  let retry = 0, retryTimer = null, alive = false;
+
+  function msg(t) { $('msg').textContent = t || ''; }
+  function conn(state, text) {
+    $('cdot').className = 'dot ' + ({ ok: 'ok', wait: 'warn', bad: 'bad' }[state] || '');
+    if (bridge && bridge.onState) bridge.onState(state + ':' + (text || ''));
+  }
+  async function api(path, body, method) {
+    const r = await fetch(BASE + path, {
+      method: method || (body ? 'POST' : 'GET'),
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    return j;
+  }
+  function send(o) {
+    if (!dc || dc.readyState !== 'open') return false;
+    o.req = ++reqNo;
+    dc.send(JSON.stringify(o));
+    return true;
+  }
+
+  // ---------------------------------------------------------------- 연결
+  async function connect() {
+    clearTimeout(retryTimer);
+    teardown();
+    msg('장치에 연결하는 중…');
+    conn('wait', 'connecting');
+    try {
+      const dev = await api('/api/device');
+      $('name').textContent = dev.name;
+    } catch (e) { return fail('장치 응답 없음: ' + e.message); }
+
+    pc = new RTCPeerConnection({ iceServers: [] });
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    dc = pc.createDataChannel('control', { ordered: true });
+    dc.onopen = () => {
+      if (wantPreview) send({ type: 'preview.start' });
+      if (focusOn) send({ type: 'focus.start' });
+      send({ type: 'status.get' });
+      if ($('cam').classList.contains('on')) loadControls();
+    };
+    dc.onmessage = e => { try { onMessage(JSON.parse(e.data)); } catch (_) {} };
+    dc.onclose = () => { if (alive) fail('제어 채널이 닫혔습니다'); };
+
+    const pending = [];
+    pc.onicecandidate = e => {
+      if (!e.candidate) return;
+      const c = e.candidate.toJSON();
+      if (sid) api('/api/webrtc/candidate', { session_id: sid, candidate: c }).catch(() => {});
+      else pending.push(c);
+    };
+    pc.ontrack = e => {
+      if (video.srcObject !== e.streams[0]) video.srcObject = e.streams[0] || new MediaStream([e.track]);
+    };
+    pc.onconnectionstatechange = () => {
+      const s = pc ? pc.connectionState : 'closed';
+      if (s === 'connected') { alive = true; retry = 0; conn('ok', 'connected'); msg(''); }
+      else if (s === 'failed') fail('연결이 끊겼습니다');
+      else if (s === 'disconnected') { conn('wait', 'disconnected'); msg('연결이 불안정합니다…'); }
+    };
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const ans = await api('/api/webrtc/offer', { type: 'offer', sdp: pc.localDescription.sdp });
+      sid = ans.session_id;
+      await pc.setRemoteDescription({ type: 'answer', sdp: ans.sdp });
+      for (const c of pending) api('/api/webrtc/candidate', { session_id: sid, candidate: c }).catch(() => {});
+    } catch (e) { fail('WebRTC 연결 실패: ' + e.message); }
+  }
+
+  function teardown() {
+    alive = false;
+    if (sid) { api('/api/webrtc/session?session_id=' + sid, null, 'DELETE').catch(() => {}); sid = null; }
+    if (dc) { dc.onclose = null; try { dc.close(); } catch (_) {} dc = null; }
+    if (pc) { pc.onconnectionstatechange = null; try { pc.close(); } catch (_) {} pc = null; }
+  }
+
+  function fail(text) {
+    teardown();
+    conn('bad', text);
+    retry++;
+    const wait = Math.min(15, 2 * retry);
+    msg(text + ' — ' + wait + '초 뒤 다시 연결');
+    retryTimer = setTimeout(connect, wait * 1000);
+  }
+
+  // ------------------------------------------------------------ 장치 메시지
+  function onMessage(m) {
+    switch (m.type) {
+      case 'hello': case 'status': if (m.status) applyStatus(m.status); break;
+      case 'preview.state': onPreview(m); break;
+      case 'capture.state': onCapture(m); break;
+      case 'camera.controls': onControls(m); break;
+      case 'focus': onFocus(m); break;
+      case 'af': onAF(m); break;
+      case 'capture.start.result': case 'button.press.result':
+        if (!m.ok) toast('촬영할 수 없습니다: ' + m.error); break;
+      case 'error': toast(m.error); break;
+    }
+  }
+
+  function applyStatus(s) {
+    if (s.device) $('name').textContent = s.device.name;
+    if (s.capture) setCapLabel(s.capture.busy ? '촬영 중' : '촬영 준비됨');
+  }
+
+  // 자동 초점 상태 (MIPI 카메라 렌즈 VCM). 위치 0~1023, 클수록 가까운 곳. ct 는 자동 화이트밸런스 색온도
+  function onAF(m) {
+    if (m.ct) { $('wbinfo').hidden = false; $('wbinfo').textContent = 'AWB ' + m.ct + 'K'; }
+    if (m.state === 'none') return; // 렌즈 VCM 없음
+    const searching = m.state === 'searching';
+    $('afinfo').hidden = false;
+    $('afdot').className = 'dot ' + (searching ? 'warn' : m.state === 'locked' ? 'ok' : '');
+    $('aftext').textContent = (searching ? 'AF 맞추는 중' : m.auto ? 'AF' : '수동 초점') + ' · 위치 ' + m.pos;
+  }
+
+  function onPreview(m) {
+    if (m.state === 'started' || m.state === 'starting') {
+      const i = m.info || {};
+      $('vinfo').textContent = !i.width ? '미리보기 시작 중'
+        : i.source === 'photo' ? `촬영 중 미리보기 ${i.width}×${i.height} 약 ${i.fps}fps`
+        : `H.264 ${i.width}×${i.height} ${i.fps}fps`;
+      $('pv').textContent = '미리보기 중지';
+      if (m.state === 'started') msg('');
+    } else if (m.state === 'stopped') {
+      $('vinfo').textContent = '미리보기 꺼짐'; $('afinfo').hidden = $('wbinfo').hidden = true;
+      $('pv').textContent = '미리보기 시작';
+    } else if (m.state === 'failed') {
+      $('vinfo').textContent = '미리보기 오류'; $('afinfo').hidden = $('wbinfo').hidden = true;
+      if (m.error) msg('미리보기 오류: ' + m.error);
+    }
+  }
+
+  const STEP_ORDER = ['white', 'uv', 'climate', 'save'];
+  function showStep(step) {
+    $('steps').classList.toggle('on', !!step);
+    const at = STEP_ORDER.indexOf(step);
+    document.querySelectorAll('.step').forEach(el => {
+      const i = STEP_ORDER.indexOf(el.dataset.s);
+      el.className = 'step' + (i === at ? ' now' : i < at ? ' done' : '');
+    });
+  }
+  function setCapLabel(t) { $('capstate').textContent = t; }
+
+  function onCapture(m) {
+    switch (m.state) {
+      case 'ready':
+        setCapLabel('촬영 준비됨'); $('shoot').disabled = false; showStep(null); break;
+      case 'started':
+        setCapLabel(m.trigger === 'button' ? '버튼 촬영 중' : '촬영 중');
+        $('shoot').disabled = true;
+        if (m.steps) document.querySelectorAll('.step').forEach(el => { el.hidden = !m.steps.includes(el.dataset.s); });
+        showStep(m.step || 'white');
+        break;
+      case 'completed':
+        setCapLabel('촬영 완료'); showStep(null); showResult(m.result);
+        if (bridge && bridge.onCapture) bridge.onCapture(JSON.stringify(m.result));
+        break;
+      case 'failed':
+        setCapLabel('촬영 실패'); showStep(null); $('shoot').disabled = false;
+        toast('촬영 실패: ' + (m.error || '')); break;
+    }
+  }
+
+  function showResult(r) {
+    if (!r) return;
+    const c = r.climate;
+    $('climate').innerHTML = c
+      ? `<div><span>온도</span>${c.temperature.toFixed(1)} ℃</div><div><span>습도</span>${c.humidity.toFixed(1)} %</div>`
+      : '<div><span>온·습도</span>측정 안 됨</div>';
+    $('shots').innerHTML = '';
+    const n = (r.images || []).length;
+    $('shots').style.setProperty('--n', Math.max(1, n));
+    $('shots').classList.toggle('one', n === 1);
+    for (const im of r.images || []) {
+      const f = document.createElement('figure');
+      const img = document.createElement('img');
+      img.src = BASE + im.url;
+      img.alt = im.kind;
+      const cap = document.createElement('figcaption');
+      cap.innerHTML = `<b>${im.kind === 'uv' ? 'UV광' : '일반광'}</b> · ${(im.bytes / 1024).toFixed(0)} KB`;
+      f.append(img, cap);
+      $('shots').append(f);
+    }
+    const notes = [r.capture_id];
+    if (r.lights_simulated) notes.push('조명 시뮬레이션');
+    if (c && c.simulated) notes.push('센서 시뮬레이션');
+    if (bridge) notes.push('사진 앱에 저장됨');
+    $('rnote').textContent = notes.join(' · ');
+    $('result').classList.add('on');
+  }
+
+  let toastTimer = null;
+  function toast(t) {
+    if (bridge && bridge.toast) { bridge.toast(t); return; }
+    msg(t); clearTimeout(toastTimer); toastTimer = setTimeout(() => { if (alive) msg(''); }, 3000);
+  }
+
+  // ------------------------------------------------------------ 카메라 설정
+  // 장치가 카메라(V4L2)의 컨트롤 목록을 그대로 준다. 아는 컨트롤은 한글 이름과 묶음으로,
+  // 모르는 것은 '기타'에 원래 이름으로 보여 준다.
+  const GROUPS = [['focus', '초점'], ['exposure', '노출'], ['wb', '화이트밸런스'], ['image', '화질'], ['etc', '기타']];
+  const KNOWN = [ // [id, 묶음, 이름, 단위 변환]
+    [0x009a090c, 'focus', '자동 초점'],
+    [0x009a090a, 'focus', '초점 위치'],
+    [0x009a0901, 'exposure', '노출 모드'],
+    [0x009a0902, 'exposure', '노출 시간', v => (v / 10).toFixed(1) + ' ms'],
+    [0x00980913, 'exposure', '게인'],
+    [0x009a0903, 'exposure', '어두우면 프레임 낮추기'],
+    [0x0098091c, 'exposure', '역광 보정'],
+    [0x0098090c, 'wb', '자동 화이트밸런스'],
+    [0x0098091a, 'wb', '색온도', v => v + ' K'],
+    [0x00980900, 'image', '밝기'],
+    [0x00980901, 'image', '대비'],
+    [0x00980902, 'image', '채도'],
+    [0x00980903, 'image', '색조'],
+    [0x00980910, 'image', '감마'],
+    [0x0098091b, 'image', '선명도'],
+    [0x00980918, 'image', '전원 주파수 (깜빡임 방지)'],
+    [0x009a090d, 'etc', '줌'],
+  ];
+  const HIDDEN = new Set([0x009a0910]); // Privacy: 켜면 영상이 까맣게 된다
+  const KNOWN_MAP = new Map(KNOWN.map((k, i) => [k[0], { group: k[1], label: k[2], fmt: k[3], order: i }]));
+  const MENU_KO = { 'Manual Mode': '수동', 'Aperture Priority Mode': '자동', 'Auto Mode': '자동',
+    'Shutter Priority Mode': '셔터 우선', 'Disabled': '끔', 'Auto': '자동' };
+
+  let ctlIds = '', ctlEls = new Map(), dragging = null, camLoaded = false;
+
+  function camMsg(t) { $('camMsg').textContent = t || ''; }
+  function camOpen(on) {
+    $('cam').classList.toggle('on', on);
+    document.body.classList.toggle('camopen', on);
+    if (on) loadControls();
+  }
+  function loadControls() {
+    if (!camLoaded) camMsg('카메라 설정을 불러오는 중…');
+    if (!send({ type: 'camera.controls.get' }))
+      api('/api/camera/controls').then(onControls, e => onControls({ ok: false, error: e.message }));
+  }
+  function setControl(id, value) {
+    if (!send({ type: 'camera.control.set', id, value }))
+      api('/api/camera/controls', { id, value }).then(onControls, e => onControls({ ok: false, error: e.message }));
+  }
+  function onControls(m) {
+    if (!m.ok && m.error) {
+      if (!camLoaded || !(m.controls || []).length) camMsg('카메라 설정을 읽지 못했습니다: ' + m.error);
+      else toast('설정 실패: ' + m.error);
+    }
+    if (m.controls && m.controls.length) { camLoaded = true; camMsg(''); renderControls(m.controls); }
+  }
+
+  function fmtVal(c, v) {
+    const k = KNOWN_MAP.get(c.id);
+    return k && k.fmt ? k.fmt(v) : String(v);
+  }
+  function menuName(it) { return MENU_KO[it.name] || it.name; }
+
+  function renderControls(list) {
+    list = list.filter(c => !c.readonly && !HIDDEN.has(c.id));
+    const ids = list.map(c => c.id).join(',');
+    if (ids !== ctlIds) buildControls(list);
+    ctlIds = ids;
+    for (const c of list) updateControl(c);
+  }
+
+  function buildControls(list) {
+    const body = $('camBody');
+    body.querySelectorAll('.grp').forEach(g => g.remove());
+    ctlEls.clear();
+    const sorted = list.slice().sort((a, b) =>
+      (KNOWN_MAP.has(a.id) ? KNOWN_MAP.get(a.id).order : 999) - (KNOWN_MAP.has(b.id) ? KNOWN_MAP.get(b.id).order : 999));
+    for (const [g, title] of GROUPS) {
+      const items = sorted.filter(c => (KNOWN_MAP.get(c.id) || { group: 'etc' }).group === g);
+      if (!items.length) continue;
+      const sec = document.createElement('section');
+      sec.className = 'grp';
+      sec.innerHTML = `<h3>${title}</h3>`;
+      for (const c of items) sec.append(buildControl(c));
+      body.append(sec);
+    }
+  }
+
+  function buildControl(c) {
+    const k = KNOWN_MAP.get(c.id);
+    const el = document.createElement('div');
+    el.className = 'ctl';
+    const head = document.createElement('div');
+    head.className = 'ctl-h';
+    const name = document.createElement('span');
+    name.className = 'ctl-n';
+    name.textContent = k ? k.label : c.name;
+    const hint = document.createElement('span');
+    hint.className = 'ctl-hint';
+    hint.textContent = '자동 켜짐';
+    head.append(name, hint);
+    el.append(head);
+    const ref = { el, c };
+
+    if (c.type === 'bool') {
+      const sw = document.createElement('label');
+      sw.className = 'sw';
+      sw.innerHTML = '<input type="checkbox"><span></span>';
+      const input = sw.firstChild;
+      input.onchange = () => setControl(c.id, input.checked ? 1 : 0);
+      head.append(sw);
+      ref.input = input;
+    } else if (c.type === 'menu') {
+      const seg = document.createElement('div');
+      seg.className = 'seg';
+      for (const it of c.menu || []) {
+        const b = document.createElement('button');
+        b.textContent = menuName(it);
+        b.dataset.v = it.v;
+        b.onclick = () => setControl(c.id, it.v);
+        seg.append(b);
+      }
+      el.append(seg);
+      ref.seg = seg;
+    } else {
+      const val = document.createElement('span');
+      val.className = 'ctl-v';
+      const reset = document.createElement('button');
+      reset.className = 'ctl-r';
+      reset.textContent = '기본';
+      reset.title = '기본값 ' + fmtVal(c, c.default);
+      reset.onclick = () => setControl(c.id, c.default);
+      head.append(val, reset);
+      const r = document.createElement('input');
+      r.type = 'range';
+      r.min = c.min; r.max = c.max; r.step = c.step > 0 ? c.step : 1;
+      // 끄는 동안은 너무 자주 보내지 않는다 (마지막 값은 change 에서 꼭 보낸다)
+      let t = null, lastSent = 0;
+      r.oninput = () => {
+        val.textContent = fmtVal(c, +r.value);
+        const now = Date.now();
+        clearTimeout(t);
+        if (now - lastSent > 150) { lastSent = now; setControl(c.id, +r.value); }
+        else t = setTimeout(() => { lastSent = Date.now(); setControl(c.id, +r.value); }, 150);
+      };
+      r.onchange = () => { clearTimeout(t); setControl(c.id, +r.value); };
+      r.onpointerdown = () => { dragging = c.id; };
+      r.onpointerup = r.onpointercancel = () => { setTimeout(() => { if (dragging === c.id) dragging = null; }, 400); };
+      el.append(r);
+      ref.input = r; ref.val = val; ref.reset = reset;
+    }
+    ctlEls.set(c.id, ref);
+    return el;
+  }
+
+  function updateControl(c) {
+    const ref = ctlEls.get(c.id);
+    if (!ref) return;
+    ref.c = c;
+    ref.el.classList.toggle('off', !!c.inactive);
+    if (c.type === 'bool') {
+      ref.input.checked = !!c.value;
+      ref.input.disabled = !!c.inactive;
+    } else if (c.type === 'menu') {
+      ref.seg.querySelectorAll('button').forEach(b => {
+        b.classList.toggle('sel', +b.dataset.v === c.value);
+        b.disabled = !!c.inactive;
+      });
+    } else {
+      ref.input.disabled = !!c.inactive;
+      ref.reset.disabled = !!c.inactive || c.value === c.default;
+      if (dragging !== c.id) { ref.input.value = c.value; ref.val.textContent = fmtVal(c, c.value); }
+    }
+  }
+
+  $('camBtn').onclick = () => camOpen(!$('cam').classList.contains('on'));
+  $('camClose').onclick = () => camOpen(false);
+  $('camReload').onclick = loadControls;
+  let resetArm = null; // WebView 에는 confirm() 창이 없을 수 있어 두 번 누르기로 확인한다
+  $('camReset').onclick = () => {
+    if (!resetArm) {
+      $('camReset').textContent = '한 번 더 누르면 초기화';
+      resetArm = setTimeout(() => { resetArm = null; $('camReset').textContent = '기본값으로'; }, 3000);
+      return;
+    }
+    clearTimeout(resetArm); resetArm = null; $('camReset').textContent = '기본값으로';
+    if (!send({ type: 'camera.controls.reset' }))
+      api('/api/camera/controls/reset', {}).then(onControls, e => onControls({ ok: false, error: e.message }));
+  };
+
+  // ------------------------------------------------------------ 초점 맞춤 보조
+  // 장치가 미리보기 원본(압축 전) 가운데 1/2 영역의 선명도(라플라시안 분산)를 약 5번/초 보낸다.
+  // 값의 크기는 장면·조명마다 다르므로 지금까지의 최고값에 대한 비율로 보여 준다.
+  const FOCUS_BEST = 0.95, FOCUS_HIST = 75; // 최고값의 95% 이상이면 초록 / 그래프 약 15초
+  let focusOn = false, focusSrc = '', focusMax = 0, focusHist = [];
+
+  function focusShow(on) {
+    focusOn = on;
+    document.body.classList.toggle('focus', on);
+    $('focBtn').classList.toggle('on', on);
+    send({ type: on ? 'focus.start' : 'focus.stop' });
+    if (on) { focusClear(); placeRoi(); }
+  }
+  function focusClear() {
+    focusMax = 0; focusHist = [];
+    $('focCur').textContent = $('focMax').textContent = '-';
+    $('focPct').textContent = '';
+    $('focFill').style.width = '0';
+    $('focFill').classList.remove('best'); $('roi').classList.remove('best');
+    drawFocus();
+  }
+  function onFocus(m) {
+    if (!focusOn) return;
+    if (m.source !== focusSrc) { focusSrc = m.source; focusClear(); } // 촬영 중 미리보기는 축소본이라 값의 크기가 다르다
+    const s = m.score;
+    focusMax = Math.max(focusMax, s);
+    focusHist.push(s);
+    if (focusHist.length > FOCUS_HIST) focusHist.shift();
+    const r = focusMax > 0 ? s / focusMax : 0, best = r >= FOCUS_BEST && focusHist.length > 5;
+    $('focCur').textContent = s.toFixed(0);
+    $('focMax').textContent = focusMax.toFixed(0);
+    $('focPct').textContent = (r * 100).toFixed(0) + '%';
+    $('focFill').style.width = (r * 100).toFixed(1) + '%';
+    $('focFill').classList.toggle('best', best);
+    $('roi').classList.toggle('best', best);
+    const hint = $('focHint');
+    const dark = m.brightness < 35, bright = m.brightness > 225;
+    hint.classList.toggle('warn', dark || bright);
+    hint.textContent = dark ? '화면이 너무 어둡습니다. 조명을 켜야 초점을 정확히 볼 수 있습니다.'
+      : bright ? '화면이 너무 밝습니다(포화). 노출을 낮추세요.'
+      : m.source === 'photo' ? '촬영 중 미리보기 기준 값입니다.'
+      : best ? '초점이 맞았습니다. 렌즈를 고정하세요.'
+      : '점선 안에 대상을 두고 렌즈를 천천히 돌리세요. 막대가 가장 길어지는(초록) 곳이 초점입니다.';
+    drawFocus();
+  }
+  function drawFocus() {
+    const cv = $('focGraph'), dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w) return;
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    if (focusHist.length < 2 || !focusMax) return;
+    const x = i => (i / (FOCUS_HIST - 1)) * w, y = v => h - 2 - (v / focusMax) * (h - 4);
+    g.strokeStyle = 'rgba(63,185,80,.5)'; g.setLineDash([4, 4]); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, y(focusMax * FOCUS_BEST)); g.lineTo(w, y(focusMax * FOCUS_BEST)); g.stroke();
+    g.setLineDash([]); g.strokeStyle = '#4fb3a9'; g.lineWidth = 2;
+    g.beginPath();
+    focusHist.forEach((v, i) => { const px = x(i + FOCUS_HIST - focusHist.length); i ? g.lineTo(px, y(v)) : g.moveTo(px, y(v)); });
+    g.stroke();
+  }
+  // 측정 영역(가운데 1/2)을 화면의 영상 위치에 맞춰 그린다 (object-fit: contain)
+  function placeRoi() {
+    const st = $('stage'), vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return;
+    const k = Math.min(st.clientWidth / vw, st.clientHeight / vh);
+    $('roi').style.width = (vw * k / 2) + 'px';
+    $('roi').style.height = (vh * k / 2) + 'px';
+  }
+  video.addEventListener('resize', placeRoi);
+  video.addEventListener('loadedmetadata', placeRoi);
+  if (window.ResizeObserver) new ResizeObserver(() => { placeRoi(); drawFocus(); }).observe($('stage'));
+  else window.addEventListener('resize', placeRoi);
+
+  $('focBtn').onclick = () => focusShow(!focusOn);
+  $('focReset').onclick = focusClear;
+
+  // ------------------------------------------------------------------ 버튼
+  $('shoot').onclick = () => {
+    // 물리 버튼과 같은 흐름 (장치에 버튼이 없을 때 시험용)
+    if (!send({ type: 'button.press' })) api('/api/button', {}).catch(e => toast(e.message));
+  };
+  $('pv').onclick = () => {
+    wantPreview = !wantPreview;
+    send({ type: wantPreview ? 'preview.start' : 'preview.stop' });
+  };
+  $('last').onclick = async () => {
+    try { showResult(await api('/api/captures/latest')); } catch (e) { toast('촬영 기록 없음'); }
+  };
+  $('close').onclick = () => $('result').classList.remove('on');
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) send({ type: 'preview.stop' });
+    else if (wantPreview) { if (!send({ type: 'preview.start' })) connect(); }
+  });
+  window.addEventListener('pagehide', teardown);
+
+  connect();
+})();
+</script>
+</body>
+</html>

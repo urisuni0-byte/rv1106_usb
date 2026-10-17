@@ -6,3 +6,4 @@ android/build/
 android/out/
 vdec_test/vdec_test
 vdec_test/uvc_vdec_test
+board/out/

@@ -1,30 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.rv1106.usbcam"
-    android:versionCode="1"
-    android:versionName="1.0">
+    android:versionCode="2"
+    android:versionName="2.0">
 
+    <!-- targetSdk 28: Android 12+ 에서도 BLUETOOTH/위치 권한 체계로 동작한다 -->
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="28" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- 보드 AP(RvCam-xxxx) 에 자동 접속 (Android 9 이하 WifiManager.addNetwork) -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- mDNS(DNS-SD) 장치 검색 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- BLE 검색/연결 (Wi-Fi 프로비저닝). Android 6~11 은 BLE 검색에 위치 권한이 필요하다 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <!-- 스냅샷을 사진 폴더에 저장 -->
+    <!-- 촬영 사진을 사진 폴더에 저장 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
     <application
-        android:label="RV1106 USB"
+        android:label="TGO-ABC 스캐너"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
         android:allowBackup="false">
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
             android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

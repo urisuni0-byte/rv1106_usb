@@ -3,18 +3,20 @@ package com.rv1106.usbcam;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.content.Context;
-import android.media.MediaScannerConnection;
-import android.content.SharedPreferences;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.media.MediaScannerConnection;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
-import android.net.Uri;
-import android.net.wifi.WifiConfiguration;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -26,10 +28,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.util.Base64;
 import android.webkit.JavascriptInterface;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -37,414 +36,614 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.net.Inet4Address;
-import java.net.InetAddress;
-import java.net.InterfaceAddress;
-import java.net.NetworkInterface;
 import java.net.URL;
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Date;
-import java.util.LinkedHashSet;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
-import java.util.concurrent.ExecutorCompletionService;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 
 /**
- * RV1106 USB 카메라 뷰어 (Luckfox Pico RV1106 + Arducam B0290 IMX298 UVC).
+ * TGO-ABC 두피 스캐너 앱 (연동 시나리오 20260812).
  *
- * 보드 IP 를 고정하지 않는다. 시작할 때와 연결이 끊길 때마다 다음 순서로 보드를 찾는다.
- *   1) 보드 자체 AP 주소 (RvCam-xxxx Wi-Fi, 192.168.4.1 고정)
- *   2) 마지막으로 찾았던 주소
- *   3) 지금 붙어 있는 Wi-Fi 서브넷 전체 (/status.json 응답으로 판별)
- * 어디에서도 못 찾으면 보드 AP(RvCam-xxxx) 에 자동으로 접속한다.
+ *   최초 등록     BLE 검색 -> 연결 -> Device Info -> Wi-Fi Provisioning(SSID/PW) -> 장치 IP/Port 수신 -> 저장
+ *   자동 재연결   저장된 장치를 마지막 주소 / mDNS(_tgoabc._tcp) 로 찾아 바로 미리보기
+ *   미리보기·촬영 WebView 의 WebRTC (H.264 + DataChannel) - assets/viewer.html (board/scannerd/web/viewer.html 사본)
+ *                 촬영 완료(capture.state completed) 를 받으면 HTTP 로 JPEG 2장을 받아 사진/TGOABC 에 저장
  */
 public class MainActivity extends Activity {
 
-    static final int PORT = 8090;   // 8080 은 RvCam 프로비저닝 API
-    static final long HEALTH_MS = 4000;
+    private static final int C_BG = 0xFF0D1117, C_CARD = 0xFF161B22, C_TEXT = 0xFFE8ECF1,
+            C_MUTED = 0xFF9AA6B2, C_ACCENT = 0xFF4FB3A9, C_BAD = 0xFFF85149;
+    private static final int REQ_BLE = 1, REQ_STORAGE = 2;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
-    private WebView web;
-    private LinearLayout panel;
-    private TextView title, detail;
-    private Button bApWifi;
-    private SharedPreferences prefs;
+    private FrameLayout root;
+    private DeviceStore store;
+    private DeviceFinder finder;
+    private BleProvisioner ble;
 
-    private volatile String boardIp;
-    private volatile boolean searching;
-    private int healthFails;
-    private boolean triedAp;
-    private String pendingDownload;
+    private WebView web;
+    private JSONObject current;       // 미리보기 중인 장치
+    private int viewerFails;
+    private boolean autoTried;
+    private String pendingCapture;    // 저장 권한을 기다리는 촬영 결과
+
+    // 등록 화면 상태
+    private final Map<String, BluetoothDevice> found = new LinkedHashMap<>();
+    private final Map<String, String> foundNames = new LinkedHashMap<>();
+    private LinearLayout foundList;
+    private TextView regStatus;
+    private JSONObject regInfo;
+    private String regSsid;
 
     // ------------------------------------------------------------ lifecycle
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        prefs = getSharedPreferences("rv1106usb", MODE_PRIVATE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        buildUi();
+        getWindow().setStatusBarColor(C_BG);
+        store = new DeviceStore(this);
+        finder = new DeviceFinder(this);
+        ble = new BleProvisioner(this, bleListener);
+        root = new FrameLayout(this);
+        root.setBackgroundColor(C_BG);
+        setContentView(root);
         watchNetwork();
-        discover("보드를 찾는 중…");
+        showHome(true);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        immersive();
-        ui.removeCallbacks(health);
-        ui.postDelayed(health, HEALTH_MS);
         if (web != null) web.onResume();
     }
 
     @Override
     protected void onPause() {
-        ui.removeCallbacks(health);
         if (web != null) web.onPause();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        finder.cancel();
+        ble.stopScan();
+        ble.close();
+        closeViewer();
         bg.shutdownNow();
-        if (web != null) web.destroy();
         super.onDestroy();
     }
 
     @Override
-    public void onWindowFocusChanged(boolean focus) {
-        super.onWindowFocusChanged(focus);
-        if (focus) immersive();
+    public void onBackPressed() {
+        if (web != null || regStatus != null) {
+            closeViewer();
+            ble.stopScan();
+            ble.close();
+            showHome(false);
+        } else {
+            super.onBackPressed();
+        }
     }
 
-    private void immersive() {
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                | View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+    // ------------------------------------------------------------ UI 도우미
+
+    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+
+    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+
+    private TextView text(String s, int sizeSp, int color, boolean bold) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(sizeSp);
+        t.setTextColor(color);
+        if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
+        return t;
     }
 
-    // ------------------------------------------------------------ UI
-
-    private void buildUi() {
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
-
-        // USB(ADB) 로 연결한 PC 의 chrome://inspect 에서만 볼 수 있다
-        WebView.setWebContentsDebuggingEnabled(true);
-        web = new WebView(this);
-        WebSettings s = web.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        // WebRTC 영상(<video muted autoplay>)이 바로 재생되도록. 소리는 뷰어에서 버튼으로만 켠다.
-        s.setMediaPlaybackRequiresUserGesture(false);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        web.setBackgroundColor(Color.BLACK);
-        web.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageFinished(WebView v, String url) {
-                // 앱이 이미 전체화면이라 뷰어의 [전체화면] 버튼은 숨긴다.
-                v.evaluateJavascript("(function(){var b=document.getElementById('b-full');"
-                        + "if(b)b.style.display='none';})()", null);
-            }
-
-            @Override
-            public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-                if (Build.VERSION.SDK_INT >= 21 && r.isForMainFrame()) lost("페이지를 열 수 없습니다");
-            }
-
-            @Override
-            @SuppressWarnings("deprecation")
-            public void onReceivedError(WebView v, int code, String desc, String url) {
-                if (Build.VERSION.SDK_INT < 23) lost("페이지를 열 수 없습니다");
-            }
-        });
-        web.setDownloadListener((url, ua, cd, mime, len) -> saveSnapshot(url));
-        // WebRTC 데이터 채널로 받은 사진은 뷰어가 이 다리로 넘긴다 (blob: URL 은 앱이 못 받으므로)
-        web.addJavascriptInterface(new Object() {
-            @JavascriptInterface
-            public String savePhoto(String name, String b64) {
-                try {
-                    byte[] jpg = Base64.decode(b64, Base64.DEFAULT);
-                    String safe = name.replaceAll("[^A-Za-z0-9_.-]", "_");
-                    if (!safe.endsWith(".jpg")) safe += ".jpg";
-                    writePhoto(safe, jpg);
-                    return "";
-                } catch (Exception e) {
-                    return e.getMessage() != null ? e.getMessage() : e.toString();
-                }
-            }
-        }, "UsbCamApp");
-        root.addView(web, new FrameLayout.LayoutParams(-1, -1));
-
-        panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setGravity(Gravity.CENTER);
-        panel.setBackgroundColor(0xF00B0D10);
-        int p = dp(24);
-        panel.setPadding(p, p, p, p);
-
-        title = new TextView(this);
-        title.setTextColor(0xFFE8ECF1);
-        title.setTextSize(20);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setGravity(Gravity.CENTER);
-        panel.addView(title);
-
-        detail = new TextView(this);
-        detail.setTextColor(0xFF8B95A3);
-        detail.setTextSize(14);
-        detail.setGravity(Gravity.CENTER);
-        detail.setPadding(0, dp(10), 0, dp(22));
-        panel.addView(detail);
-
-        Button bRetry = button("다시 찾기", v -> discover("보드를 찾는 중…"));
-        bApWifi = button("보드 Wi-Fi (RvCam) 에 연결", v -> connectAp(true));
-        Button bManual = button("주소 직접 입력", v -> askAddress());
-        panel.addView(bRetry);
-        panel.addView(bApWifi);
-        panel.addView(bManual);
-
-        root.addView(panel, new FrameLayout.LayoutParams(-1, -1));
-        setContentView(root);
-    }
-
-    private Button button(String text, View.OnClickListener l) {
+    private Button button(String s, boolean primary, View.OnClickListener l) {
         Button b = new Button(this);
-        b.setText(text);
+        b.setText(s);
         b.setAllCaps(false);
+        b.setTextColor(primary ? 0xFF04110F : C_TEXT);
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(12));
+        g.setColor(primary ? C_ACCENT : 0x22FFFFFF);
+        b.setBackground(g);
         b.setOnClickListener(l);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(280), ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(8);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(52));
+        lp.topMargin = dp(10);
         b.setLayoutParams(lp);
         return b;
     }
 
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+    private LinearLayout card() {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(14));
+        g.setColor(C_CARD);
+        c.setBackground(g);
+        c.setPadding(dp(16), dp(14), dp(16), dp(14));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(10);
+        c.setLayoutParams(lp);
+        return c;
     }
 
-    private void showPanel(String t, String d) {
-        title.setText(t);
-        detail.setText(d);
-        panel.setVisibility(View.VISIBLE);
+    /** 가운데 정렬된 세로 화면 틀 (최대 폭 560dp) */
+    private LinearLayout page(String title, String subtitle) {
+        root.removeAllViews();
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        FrameLayout wrap = new FrameLayout(this);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(20), dp(28), dp(20), dp(28));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                Math.min(dp(560), getResources().getDisplayMetrics().widthPixels), -2, Gravity.CENTER_HORIZONTAL);
+        wrap.addView(col, lp);
+        sv.addView(wrap);
+        root.addView(sv);
+        col.addView(text(title, 24, C_TEXT, true));
+        if (subtitle != null) {
+            TextView s = text(subtitle, 14, C_MUTED, false);
+            s.setPadding(0, dp(6), 0, dp(10));
+            col.addView(s);
+        }
+        return col;
     }
 
-    private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    // ------------------------------------------------------------ 홈
+
+    private TextView homeStatus;
+
+    private void showHome(boolean autoConnect) {
+        regStatus = null;
+        LinearLayout col = page("TGO-ABC 스캐너", "두피 스캐너를 BLE 로 등록하고, 같은 Wi-Fi 에서 미리보기·촬영합니다");
+        List<JSONObject> devs = store.list();
+
+        homeStatus = text("", 14, C_MUTED, false);
+        homeStatus.setPadding(0, dp(4), 0, dp(4));
+
+        if (devs.isEmpty()) {
+            LinearLayout c = card();
+            c.addView(text("등록된 장치가 없습니다", 16, C_TEXT, true));
+            TextView d = text("장치 전원을 켜고 [새 장치 등록]을 누르세요. 블루투스로 장치를 찾아 Wi-Fi 정보를 넣어 줍니다.", 14, C_MUTED, false);
+            d.setPadding(0, dp(6), 0, 0);
+            c.addView(d);
+            col.addView(c);
+        } else {
+            TextView h = text("등록된 장치", 14, C_MUTED, true);
+            h.setPadding(0, dp(14), 0, 0);
+            col.addView(h);
+            for (final JSONObject d : devs) {
+                LinearLayout c = card();
+                c.addView(text(d.optString("name"), 17, C_TEXT, true));
+                TextView s = text(d.optString("model") + " · " + d.optString("id")
+                        + "\n마지막 주소 " + d.optString("ip") + ":" + d.optInt("port", 8090)
+                        + (d.optString("ssid").isEmpty() ? "" : " (" + d.optString("ssid") + ")"), 13, C_MUTED, false);
+                s.setPadding(0, dp(4), 0, 0);
+                c.addView(s);
+                c.setOnClickListener(v -> reconnect(d));
+                c.setOnLongClickListener(v -> {
+                    new AlertDialog.Builder(this).setTitle(d.optString("name"))
+                            .setItems(new String[]{"Wi-Fi 다시 설정 (BLE)", "주소 직접 입력", "목록에서 삭제"}, (dl, w) -> {
+                                if (w == 0) showRegister();
+                                else if (w == 1) askAddress(d);
+                                else { store.remove(d.optString("id")); showHome(false); }
+                            }).show();
+                    return true;
+                });
+                col.addView(c);
+            }
+        }
+        col.addView(homeStatus);
+        col.addView(button("새 장치 등록 (BLE)", devs.isEmpty(), v -> showRegister()));
+
+        if (autoConnect && !devs.isEmpty() && !autoTried) {
+            autoTried = true;
+            reconnect(devs.get(0));
+        }
     }
 
-    // ------------------------------------------------------------ discovery
-
-    private void discover(String why) {
-        if (searching) return;
-        searching = true;
-        showPanel(why, "보드 Wi-Fi(RvCam) 또는 같은 공유기에서 카메라 보드를 찾고 있습니다");
-        bg.execute(() -> {
-            String ip = findBoard();
-            ui.post(() -> {
-                searching = false;
-                if (ip != null) {
-                    open(ip);
-                } else if (!triedAp && connectAp(false)) {
-                    triedAp = true;
-                    showPanel("보드 Wi-Fi 에 연결하는 중…",
-                            "연결되면 자동으로 영상을 엽니다");
-                    ui.postDelayed(() -> discover("보드를 찾는 중…"), 6000);
-                } else {
-                    showPanel("카메라 보드를 찾지 못했습니다",
-                            "보드 전원이 켜져 있는지, 패드가 보드 Wi-Fi(RvCam) 나\n"
-                            + "보드와 같은 공유기에 연결돼 있는지 확인하세요.\n"
-                            + "5초 후 다시 찾습니다.");
-                    ui.postDelayed(() -> { if (boardIp == null) discover("보드를 찾는 중…"); }, 5000);
-                }
-            });
+    /** 자동 재연결: 저장된 Wi-Fi 에 붙은 장치를 마지막 주소 / mDNS 로 찾는다 */
+    private void reconnect(final JSONObject d) {
+        if (homeStatus != null) {
+            homeStatus.setTextColor(C_MUTED);
+            homeStatus.setText(d.optString("name") + " 찾는 중… (mDNS)");
+        }
+        finder.find(d.optString("id"), d.optString("ip"), d.optInt("port", 8090), 12000, new DeviceFinder.Callback() {
+            @Override public void onFound(String ip, int port, JSONObject info) {
+                JSONObject n = merge(d, info, ip, port);
+                store.save(n);
+                openViewer(n);
+            }
+            @Override public void onFail(String why) {
+                if (homeStatus == null) return;
+                homeStatus.setTextColor(C_BAD);
+                homeStatus.setText(d.optString("name") + ": " + why
+                        + "\n장치 전원과 Wi-Fi 를 확인하세요. 길게 누르면 Wi-Fi 를 다시 설정할 수 있습니다.");
+            }
         });
     }
 
-    private void open(String ip) {
-        boardIp = ip;
-        healthFails = 0;
-        prefs.edit().putString("last_ip", ip).apply();
-        panel.setVisibility(View.GONE);
-        web.loadUrl("http://" + ip + ":" + PORT + "/");
-        toast("카메라 연결: " + ip + (Config.AP_IP.equals(ip) ? " (보드 Wi-Fi)" : ""));
-    }
-
-    private void lost(String why) {
-        if (boardIp == null && searching) return;
-        boardIp = null;
-        web.stopLoading();
-        web.loadUrl("about:blank");
-        discover(why + " – 다시 찾는 중…");
-    }
-
-    /** 연결된 보드가 여전히 응답하는지 주기적으로 확인 (IP 가 바뀌면 다시 찾는다). */
-    private final Runnable health = new Runnable() {
-        @Override
-        public void run() {
-            final String ip = boardIp;
-            if (ip != null && !searching) {
-                bg.execute(() -> {
-                    boolean ok = probe(ip, 1500);
-                    ui.post(() -> {
-                        if (!ip.equals(boardIp)) return;
-                        healthFails = ok ? 0 : healthFails + 1;
-                        if (healthFails >= 2) lost("연결이 끊겼습니다");
-                    });
-                });
+    private static JSONObject merge(JSONObject base, JSONObject info, String ip, int port) {
+        JSONObject n = new JSONObject();
+        try {
+            if (base != null) for (java.util.Iterator<String> it = base.keys(); it.hasNext(); ) {
+                String k = it.next();
+                n.put(k, base.get(k));
             }
-            ui.postDelayed(this, HEALTH_MS);
+            for (String k : new String[]{"id", "name", "model", "fw"}) if (info.has(k)) n.put(k, info.get(k));
+            n.put("ip", ip);
+            n.put("port", port);
+        } catch (Exception ignored) { }
+        return n;
+    }
+
+    private void askAddress(final JSONObject d) {
+        final EditText e = new EditText(this);
+        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        e.setText(d.optString("ip"));
+        new AlertDialog.Builder(this).setTitle("장치 주소").setView(e)
+                .setPositiveButton("연결", (dl, w) -> {
+                    final String ip = e.getText().toString().trim().replaceAll("^https?://", "").replaceAll("[:/].*$", "");
+                    final int port = d.optInt("port", 8090);
+                    bg.execute(() -> {
+                        JSONObject info = DeviceFinder.probe(ip, port, 2000);
+                        ui.post(() -> {
+                            if (info == null) toast(ip + ":" + port + " 응답 없음");
+                            else { JSONObject n = merge(d, info, ip, port); store.save(n); openViewer(n); }
+                        });
+                    });
+                })
+                .setNegativeButton("취소", null).show();
+    }
+
+    // ------------------------------------------------------------ 최초 등록 (BLE)
+
+    private void showRegister() {
+        finder.cancel();
+        if (!ble.available()) { toast("이 기기는 블루투스를 지원하지 않습니다"); return; }
+        if (!hasBlePermissions()) { requestBlePermissions(); return; }
+        if (!ble.enabled()) {
+            startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE));
+            return;
+        }
+        regInfo = null;
+        found.clear();
+        foundNames.clear();
+        LinearLayout col = page("새 장치 등록", "1. 장치 전원을 켜면 블루투스로 광고합니다. 목록에서 장치를 고르세요.");
+        regStatus = text("BLE 검색 중…", 14, C_MUTED, false);
+        col.addView(regStatus);
+        foundList = new LinearLayout(this);
+        foundList.setOrientation(LinearLayout.VERTICAL);
+        col.addView(foundList);
+        col.addView(button("다시 검색", false, v -> showRegister()));
+        col.addView(button("취소", false, v -> { ble.stopScan(); ble.close(); showHome(false); }));
+        ble.startScan();
+        ui.postDelayed(() -> {
+            if (regStatus != null && found.isEmpty() && regInfo == null)
+                regStatus.setText("장치를 찾지 못했습니다. 장치 전원, 위치(GPS) 설정이 켜져 있는지 확인하세요.");
+        }, 10000);
+    }
+
+    private void renderFound() {
+        if (foundList == null) return;
+        foundList.removeAllViews();
+        for (Map.Entry<String, BluetoothDevice> e : found.entrySet()) {
+            final BluetoothDevice d = e.getValue();
+            LinearLayout c = card();
+            c.addView(text(foundNames.get(e.getKey()), 17, C_TEXT, true));
+            c.addView(text(d.getAddress(), 13, C_MUTED, false));
+            c.setOnClickListener(v -> {
+                regStatus.setText(foundNames.get(e.getKey()) + " 연결 중…");
+                ble.connect(d);
+            });
+            foundList.addView(c);
+        }
+        if (!found.isEmpty()) regStatus.setText("장치 " + found.size() + "대 발견 - 눌러서 연결");
+    }
+
+    /** 2. Device Info 를 받은 뒤 Wi-Fi 입력 화면 */
+    private void showWifiForm(JSONObject info) {
+        regInfo = info;
+        LinearLayout col = page("Wi-Fi 설정", "2. 장치가 접속할 공유기 정보를 넣으세요. 이 폰과 같은 Wi-Fi 여야 자동 재연결이 됩니다.");
+        LinearLayout c = card();
+        c.addView(text(info.optString("name"), 17, C_TEXT, true));
+        c.addView(text("모델 " + info.optString("model") + " · 펌웨어 " + info.optString("fw")
+                + "\n식별자 " + info.optString("id"), 13, C_MUTED, false));
+        col.addView(c);
+
+        final EditText ssid = new EditText(this);
+        ssid.setHint("Wi-Fi 이름 (SSID)");
+        ssid.setSingleLine(true);
+        ssid.setTextColor(C_TEXT);
+        ssid.setHintTextColor(C_MUTED);
+        String cur = currentSsid();
+        if (cur != null) ssid.setText(cur);
+        col.addView(ssid);
+
+        final EditText pw = new EditText(this);
+        pw.setHint("비밀번호 (개방형이면 비움)");
+        pw.setSingleLine(true);
+        pw.setTextColor(C_TEXT);
+        pw.setHintTextColor(C_MUTED);
+        pw.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        col.addView(pw);
+
+        regStatus = text("", 14, C_MUTED, false);
+        regStatus.setPadding(0, dp(8), 0, 0);
+        col.addView(regStatus);
+
+        final Button go = button("Wi-Fi 연결", true, null);
+        go.setOnClickListener(v -> {
+            String s = ssid.getText().toString().trim();
+            String p = pw.getText().toString();
+            if (s.isEmpty()) { toast("SSID 를 입력하세요"); return; }
+            if (!p.isEmpty() && (p.length() < 8 || p.length() > 63)) { toast("비밀번호는 8~63자입니다"); return; }
+            regSsid = s;
+            if (!ble.provision(s, p)) { regStatus.setText("BLE 연결이 끊겼습니다. 다시 등록하세요."); return; }
+            go.setEnabled(false);
+            regStatus.setTextColor(C_MUTED);
+            regStatus.setText("Wi-Fi 정보 전송…");
+            ui.postDelayed(() -> go.setEnabled(true), 3000);
+        });
+        col.addView(go);
+        col.addView(button("취소", false, v -> { ble.close(); showHome(false); }));
+    }
+
+    private final BleProvisioner.Listener bleListener = new BleProvisioner.Listener() {
+        @Override public void onFound(BluetoothDevice d, String name, int rssi) {
+            if (regInfo != null || regStatus == null) return;
+            if (!found.containsKey(d.getAddress())) {
+                found.put(d.getAddress(), d);
+                foundNames.put(d.getAddress(), name + "  (" + rssi + " dBm)");
+                renderFound();
+            }
+        }
+
+        @Override public void onReady(JSONObject info) {
+            showWifiForm(info);
+        }
+
+        @Override public void onStatus(JSONObject st) {
+            if (regStatus == null || regInfo == null) return;
+            String state = st.optString("state");
+            switch (state) {
+                case "connecting":
+                    regStatus.setTextColor(C_MUTED);
+                    regStatus.setText("장치가 '" + st.optString("ssid") + "' 에 접속하는 중… (최대 1분)");
+                    break;
+                case "connected":
+                    // 이번에 보낸 요청의 결과만 받는다 (구독 직후 오는 예전 상태는 무시)
+                    if (regSsid == null || !regSsid.equals(st.optString("ssid"))) break;
+                    regStatus.setTextColor(C_ACCENT);
+                    regStatus.setText("연결됨: " + st.optString("ip") + ":" + st.optInt("port"));
+                    JSONObject d = merge(regInfo, regInfo, st.optString("ip"), st.optInt("port", 8090));
+                    try { d.put("ssid", st.optString("ssid")); } catch (Exception ignored) { }
+                    store.save(d);
+                    regSsid = null;
+                    ble.close();
+                    ui.postDelayed(() -> openViewer(d), 800);
+                    break;
+                case "failed":
+                    regStatus.setTextColor(C_BAD);
+                    regStatus.setText("실패: " + st.optString("error", "Wi-Fi 접속 실패") + "\n정보를 고쳐 다시 시도하세요.");
+                    break;
+            }
+        }
+
+        @Override public void onError(String msg) {
+            if (regStatus != null) { regStatus.setTextColor(C_BAD); regStatus.setText(msg); }
+            else toast(msg);
+        }
+
+        @Override public void onDisconnected() {
+            if (regStatus != null && regInfo != null && regSsid != null) {
+                regStatus.setTextColor(C_BAD);
+                regStatus.setText("BLE 연결이 끊겼습니다. 장치가 Wi-Fi 에 붙었는지 홈에서 확인하세요.");
+            }
         }
     };
 
-    private String findBoard() {
-        LinkedHashSet<String> first = new LinkedHashSet<>();
-        first.add(Config.AP_IP);
-        String last = prefs.getString("last_ip", null);
-        if (last != null) first.add(last);
-        for (String ip : first) if (probe(ip, 800)) return ip;
-
-        List<String> hosts = subnetHosts();
-        hosts.removeAll(first);
-        if (hosts.isEmpty()) return null;
-        ExecutorService pool = Executors.newFixedThreadPool(48);
-        ExecutorCompletionService<String> cs = new ExecutorCompletionService<>(pool);
-        List<Future<String>> fs = new ArrayList<>();
-        for (final String h : hosts) fs.add(cs.submit(() -> probe(h, 700) ? h : null));
+    private String currentSsid() {
         try {
-            for (int i = 0; i < fs.size(); i++) {
-                Future<String> f = cs.poll(6, TimeUnit.SECONDS);
-                if (f == null) break;
-                String r = f.get();
-                if (r != null) return r;
-            }
-        } catch (Exception ignored) {
-        } finally {
-            pool.shutdownNow();
-        }
-        return null;
-    }
-
-    /** 패드가 붙어 있는 IPv4 /24 서브넷의 모든 호스트 (자기 자신 제외). */
-    private List<String> subnetHosts() {
-        List<String> out = new ArrayList<>();
-        try {
-            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if (!ni.isUp() || ni.isLoopback()) continue;
-                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
-                    InetAddress a = ia.getAddress();
-                    if (!(a instanceof Inet4Address) || !a.isSiteLocalAddress()) continue;
-                    byte[] q = a.getAddress();
-                    String base = (q[0] & 255) + "." + (q[1] & 255) + "." + (q[2] & 255) + ".";
-                    for (int i = 1; i < 255; i++) {
-                        if (i == (q[3] & 255)) continue;
-                        String h = base + i;
-                        if (!out.contains(h)) out.add(h);
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return out;
-    }
-
-    /** http://ip:8090/status.json 이 카메라 서버의 응답인지 확인. */
-    static boolean probe(String ip, int timeoutMs) {
-        HttpURLConnection c = null;
-        try {
-            c = (HttpURLConnection) new URL("http://" + ip + ":" + PORT + "/status.json").openConnection();
-            c.setConnectTimeout(timeoutMs);
-            c.setReadTimeout(timeoutMs);
-            c.setUseCaches(false);
-            if (c.getResponseCode() != 200) return false;
-            byte[] buf = new byte[1024];
-            InputStream in = c.getInputStream();
-            int n = in.read(buf);
-            String s = n > 0 ? new String(buf, 0, n, "UTF-8") : "";
-            return s.contains("\"card\"") && s.contains("\"width\"");
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            WifiInfo wi = wm != null ? wm.getConnectionInfo() : null;
+            String s = wi != null ? wi.getSSID() : null;
+            if (s == null || s.contains("unknown ssid")) return null;
+            return s.replaceAll("^\"|\"$", "");
         } catch (Exception e) {
-            return false;
-        } finally {
-            if (c != null) c.disconnect();
+            return null;
         }
     }
 
-    // ------------------------------------------------------------ 보드 AP (RvCam-xxxx)
+    // ------------------------------------------------------------ 권한
 
-    /** Android 9 이하: 보드 AP 를 등록하고 접속한다. 이미 저장된 RvCam-xxxx 가 있으면 그걸 쓴다. */
-    @SuppressWarnings("deprecation")
-    private boolean connectAp(boolean userAsked) {
-        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        if (wm == null) return false;
-        if (Build.VERSION.SDK_INT >= 29) {
-            if (userAsked) {
-                toast("Wi-Fi 설정에서 '" + Config.AP_SSID + "' 에 연결하세요");
-                startActivity(new android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS));
-            }
-            return false;
+    private boolean hasBlePermissions() {
+        if (Build.VERSION.SDK_INT < 23) return true;
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestBlePermissions() {
+        if (Build.VERSION.SDK_INT >= 23)
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_BLE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
+        if (code == REQ_BLE) {
+            if (ok) showRegister();
+            else toast("BLE 검색에는 위치 권한이 필요합니다");
+        } else if (code == REQ_STORAGE && pendingCapture != null) {
+            String js = pendingCapture;
+            pendingCapture = null;
+            if (ok) saveCapture(js);
+            else toast("저장 권한이 없어 사진을 저장하지 못했습니다");
         }
-        try {
-            if (!wm.isWifiEnabled()) wm.setWifiEnabled(true);
-            String quoted = "\"" + Config.AP_SSID + "\"";
-            int id = -1;
-            List<WifiConfiguration> known = wm.getConfiguredNetworks();
-            if (known != null) {
-                for (WifiConfiguration w : known)
-                    if (quoted.equals(w.SSID)) { id = w.networkId; break; }
-                // SSID 끝자리는 보드 MAC 마다 다르다 (RvCam-0b9b 등) - 저장된 RvCam-* 를 우선 사용
-                if (id < 0)
-                    for (WifiConfiguration w : known)
-                        if (w.SSID != null && w.SSID.startsWith("\"" + Config.AP_SSID_PREFIX)) {
-                            id = w.networkId;
-                            break;
+    }
+
+    // ------------------------------------------------------------ 미리보기 (WebRTC)
+
+    private void openViewer(JSONObject d) {
+        finder.cancel();
+        closeViewer();
+        regStatus = null;
+        current = d;
+        viewerFails = 0;
+        root.removeAllViews();
+
+        WebView.setWebContentsDebuggingEnabled(true); // PC chrome://inspect 로 볼 수 있게
+        web = new WebView(this);
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        web.setBackgroundColor(Color.BLACK);
+        web.setWebViewClient(new WebViewClient());
+        web.addJavascriptInterface(new Bridge(), "Android");
+        root.addView(web, new FrameLayout.LayoutParams(-1, -1));
+
+        // 앱에 들어 있는 뷰어를 장치 주소를 기준(origin)으로 띄운다 -> fetch('/api/..') 가 장치로 간다
+        String base = "http://" + d.optString("ip") + ":" + d.optInt("port", 8090) + "/";
+        web.loadDataWithBaseURL(base, readAsset("viewer.html"), "text/html", "utf-8", null);
+    }
+
+    private void closeViewer() {
+        if (web != null) {
+            root.removeView(web);
+            web.loadUrl("about:blank");
+            web.destroy();
+            web = null;
+        }
+    }
+
+    private String readAsset(String name) {
+        try (InputStream in = getAssets().open(name)) {
+            return DeviceFinder.readAll(in);
+        } catch (Exception e) {
+            return "<p style='color:#fff'>viewer.html 없음: " + e + "</p>";
+        }
+    }
+
+    /** viewer.html 이 부르는 다리 (window.Android) */
+    final class Bridge {
+        @JavascriptInterface
+        public void onCapture(String json) {
+            ui.post(() -> saveCapture(json));
+        }
+
+        @JavascriptInterface
+        public void toast(String t) {
+            ui.post(() -> MainActivity.this.toast(t));
+        }
+
+        @JavascriptInterface
+        public void onState(String s) {
+            ui.post(() -> {
+                if (s.startsWith("ok:")) { viewerFails = 0; return; }
+                if (!s.startsWith("bad:") || current == null) return;
+                // 연결이 계속 안 되면 장치 주소가 바뀌었을 수 있다 (DHCP) -> mDNS 로 다시 찾는다
+                if (++viewerFails == 3) {
+                    final JSONObject d = current;
+                    finder.find(d.optString("id"), null, 0, 15000, new DeviceFinder.Callback() {
+                        @Override public void onFound(String ip, int port, JSONObject info) {
+                            if (current != d) return;
+                            if (ip.equals(d.optString("ip")) && port == d.optInt("port")) return;
+                            JSONObject n = merge(d, info, ip, port);
+                            store.save(n);
+                            MainActivity.this.toast("장치 주소가 바뀌었습니다: " + ip);
+                            openViewer(n);
                         }
-            }
-            if (id < 0) {
-                WifiConfiguration w = new WifiConfiguration();
-                w.SSID = quoted;
-                w.preSharedKey = "\"" + Config.AP_PASSWORD + "\"";
-                w.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
-                id = wm.addNetwork(w);
-            }
-            if (id < 0) {
-                if (userAsked) toast("보드 Wi-Fi 를 추가하지 못했습니다");
-                return false;
-            }
-            boolean ok = wm.enableNetwork(id, true) && wm.reconnect();
-            if (userAsked) toast(ok ? "보드 Wi-Fi 에 연결하는 중…" : "보드 Wi-Fi 연결 실패");
-            if (ok && userAsked) {
-                triedAp = true;
-                ui.postDelayed(() -> discover("보드를 찾는 중…"), 6000);
-            }
-            return ok;
-        } catch (SecurityException e) {
-            if (userAsked) toast("Wi-Fi 변경 권한이 없습니다");
-            return false;
+                        @Override public void onFail(String why) { }
+                    });
+                }
+            });
         }
     }
+
+    // ------------------------------------------------------------ 촬영 결과 저장
+
+    /** 온도/습도/JPEG(일반광/UV광) - HTTP 로 받아 사진/TGOABC 에 저장한다 */
+    private void saveCapture(final String json) {
+        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            pendingCapture = json;
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
+            return;
+        }
+        final JSONObject d = current;
+        if (d == null) return;
+        final String base = "http://" + d.optString("ip") + ":" + d.optInt("port", 8090);
+        bg.execute(() -> {
+            try {
+                JSONObject r = new JSONObject(json);
+                String id = r.getString("capture_id");
+                File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "TGOABC");
+                if (!dir.isDirectory() && !dir.mkdirs()) throw new Exception("폴더를 만들 수 없습니다");
+                JSONArray ims = r.getJSONArray("images");
+                int n = 0;
+                for (int i = 0; i < ims.length(); i++) {
+                    JSONObject im = ims.getJSONObject(i);
+                    File f = new File(dir, id + "_" + im.getString("kind") + ".jpg");
+                    download(base + im.getString("url"), f);
+                    MediaScannerConnection.scanFile(this, new String[]{f.getAbsolutePath()}, new String[]{"image/jpeg"}, null);
+                    n++;
+                }
+                try (FileOutputStream out = new FileOutputStream(new File(dir, id + ".json"))) {
+                    out.write(r.toString(2).getBytes(StandardCharsets.UTF_8));
+                }
+                JSONObject c = r.optJSONObject("climate");
+                final String msg = "사진/TGOABC 에 " + n + "장 저장"
+                        + (c != null ? String.format(java.util.Locale.US, " · %.1f℃ %.1f%%",
+                                c.optDouble("temperature"), c.optDouble("humidity")) : "");
+                ui.post(() -> toast(msg));
+            } catch (Exception e) {
+                ui.post(() -> toast("저장 실패: " + e.getMessage()));
+            }
+        });
+    }
+
+    private static void download(String url, File f) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(15000);
+            if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+            try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(f)) {
+                byte[] buf = new byte[64 * 1024];
+                for (int r; (r = in.read(buf)) > 0; ) out.write(buf, 0, r);
+            }
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    // ------------------------------------------------------------ 네트워크
 
     /**
-     * 보드 AP 에는 인터넷이 없어서 Android 가 기본 네트워크로 쓰지 않을 수 있다.
-     * Wi-Fi 가 바뀔 때마다 앱 트래픽을 Wi-Fi 에 묶고 보드를 다시 찾는다.
+     * 공유기에 인터넷이 없으면 Android 가 앱 트래픽을 모바일 데이터로 보낼 수 있다.
+     * Wi-Fi 가 잡히면 앱 프로세스를 Wi-Fi 에 묶는다 (장치는 같은 LAN 에 있다).
      */
     private void watchNetwork() {
         if (Build.VERSION.SDK_INT < 23) return;
@@ -455,117 +654,8 @@ public class MainActivity extends Activity {
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build();
         cm.registerNetworkCallback(req, new ConnectivityManager.NetworkCallback() {
-            @Override
-            public void onAvailable(Network n) {
-                cm.bindProcessToNetwork(n);
-                ui.postDelayed(() -> {
-                    String ip = boardIp;
-                    if (ip == null) discover("Wi-Fi 연결됨 – 보드를 찾는 중…");
-                    else bg.execute(() -> { if (!probe(ip, 1200)) ui.post(() -> lost("네트워크가 바뀌었습니다")); });
-                }, 1500);
-            }
-
-            @Override
-            public void onLost(Network n) {
-                cm.bindProcessToNetwork(null);
-            }
+            @Override public void onAvailable(Network n) { cm.bindProcessToNetwork(n); }
+            @Override public void onLost(Network n) { cm.bindProcessToNetwork(null); }
         });
-    }
-
-    // ------------------------------------------------------------ snapshot
-
-    private void saveSnapshot(String url) {
-        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28
-                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                   != PackageManager.PERMISSION_GRANTED) {
-            pendingDownload = url;
-            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
-            return;
-        }
-        // DownloadManager 는 시스템 프로세스라 인터넷 없는 보드 AP 를 안 탈 수 있다.
-        // 앱 프로세스(Wi-Fi 에 묶여 있음)에서 직접 받아 저장한다.
-        final String name = "UsbCam_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".jpg";
-        bg.execute(() -> {
-            HttpURLConnection c = null;
-            try {
-                File dir = new File(Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_PICTURES), "RV1106USB");
-                if (!dir.isDirectory() && !dir.mkdirs()) throw new Exception("폴더를 만들 수 없습니다");
-                File f = new File(dir, name);
-                c = (HttpURLConnection) new URL(url).openConnection();
-                c.setConnectTimeout(3000);
-                c.setReadTimeout(10000);
-                if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
-                long n = 0;
-                try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(f)) {
-                    byte[] buf = new byte[64 * 1024];
-                    for (int r; (r = in.read(buf)) > 0; ) { out.write(buf, 0, r); n += r; }
-                }
-                MediaScannerConnection.scanFile(this, new String[]{f.getAbsolutePath()},
-                        new String[]{"image/jpeg"}, null);
-                final long kb = n / 1024;
-                ui.post(() -> toast("사진/RV1106USB/" + name + " (" + kb + " KB)"));
-            } catch (Exception e) {
-                ui.post(() -> toast("저장 실패: " + e.getMessage()));
-            } finally {
-                if (c != null) c.disconnect();
-            }
-        });
-    }
-
-    /** 사진/RV1106USB 에 저장하고 갤러리에 알린다. 어느 스레드에서든 호출 가능. */
-    private void writePhoto(String name, byte[] jpg) throws Exception {
-        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28
-                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                   != PackageManager.PERMISSION_GRANTED) {
-            ui.post(() -> requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 2));
-            throw new Exception("저장 권한이 필요합니다. 허용 후 다시 찍어 주세요");
-        }
-        File dir = new File(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_PICTURES), "RV1106USB");
-        if (!dir.isDirectory() && !dir.mkdirs()) throw new Exception("폴더를 만들 수 없습니다");
-        File f = new File(dir, name);
-        try (FileOutputStream out = new FileOutputStream(f)) {
-            out.write(jpg);
-        }
-        MediaScannerConnection.scanFile(this, new String[]{f.getAbsolutePath()},
-                new String[]{"image/jpeg"}, null);
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
-        if (code == 1 && pendingDownload != null) {
-            String u = pendingDownload;
-            pendingDownload = null;
-            if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) saveSnapshot(u);
-            else toast("저장 권한이 없어 스냅샷을 저장하지 못했습니다");
-        }
-    }
-
-    // ------------------------------------------------------------ manual
-
-    private void askAddress() {
-        final EditText e = new EditText(this);
-        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        e.setHint("예: 172.30.1.44");
-        String last = prefs.getString("last_ip", null);
-        if (last != null) e.setText(last);
-        new AlertDialog.Builder(this)
-                .setTitle("보드 주소")
-                .setView(e)
-                .setPositiveButton("열기", (d, w) -> {
-                    final String ip = e.getText().toString().trim().replaceAll("^https?://", "").replaceAll("[:/].*$", "");
-                    if (ip.isEmpty()) return;
-                    showPanel("확인 중…", ip);
-                    bg.execute(() -> {
-                        boolean ok = probe(ip, 1500);
-                        ui.post(() -> {
-                            if (ok) open(ip);
-                            else showPanel("응답이 없습니다", ip + ":" + PORT + " 에서 카메라 서버를 찾지 못했습니다");
-                        });
-                    });
-                })
-                .setNegativeButton("취소", null)
-                .show();
     }
 }

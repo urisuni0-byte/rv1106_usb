@@ -1,0 +1,62 @@
+#!/bin/sh
+# TGO-ABC 스캐너 장치 데몬 (scannerd)
+# /etc/init.d/S96scanner - Buildroot init (systemd 없음)
+#
+# 감시 루프가 scannerd 를 실행하고, 죽으면 3초 뒤 다시 띄운다.
+# 카메라는 미리보기/촬영 때만 camhelper 가 연다 (카메라를 나중에 꽂아도 된다).
+DIR=/opt/scanner
+LOG=/tmp/scanner.log
+PIDFILE=/var/run/scanner.pid
+
+# camhelper 가 쓰는 rockit / mpp 라이브러리
+export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib:/usr/lib:/lib
+
+supervise() {
+    while true; do
+        [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 1048576 ] && : >"$LOG"
+        echo "=== start $(date) ===" >>"$LOG"
+        "$DIR/scannerd" -c "$DIR/scanner.conf" >>"$LOG" 2>&1
+        echo "=== exit $? $(date), restart in 3s ===" >>"$LOG"
+        sleep 3
+    done
+}
+
+case "$1" in
+start)
+    echo "Starting scanner"
+    start-stop-daemon -S -b -m -p "$PIDFILE" -x /bin/sh -- "$0" supervise
+    ;;
+stop)
+    echo "Stopping scanner"
+    start-stop-daemon -K -q -p "$PIDFILE"
+    rm -f "$PIDFILE"
+    killall scannerd camhelper 2>/dev/null
+    # 포트(8090)와 HCI 를 놓을 때까지 기다린다 - 바로 다시 띄우면 bind 가 실패한다
+    i=0
+    while [ $i -lt 10 ] && pidof scannerd >/dev/null; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    ;;
+restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+supervise)
+    supervise
+    ;;
+status)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "running"
+        tail -8 "$LOG"
+    else
+        echo "stopped"
+    fi
+    ;;
+*)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+exit 0

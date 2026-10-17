@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# RV1106 USB 패드 앱 빌드 (Gradle 없이 Android SDK 빌드 도구만 사용)
+# TGO-ABC 스캐너 앱 빌드 (Gradle 없이 Android SDK 빌드 도구만 사용)
 #   bash android/build.sh            -> android/out/RV1106USB.apk
-# 보드 AP 정보는 환경변수로 바꿀 수 있다 (기본값: RvCam 보드 기본 설정)
-#   AP_SSID=RvCam-0b9b AP_PASSWORD=rvcam12345 bash android/build.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -14,23 +12,10 @@ export PATH="$JAVA_HOME/bin:$PATH"
 EXE=""; [ -f "$BT/aapt2.exe" ] && EXE=".exe"
 BAT=""; [ -f "$BT/d8.bat" ] && BAT=".bat"
 
-SSID="${AP_SSID:-RvCam-0b9b}"
-PW="${AP_PASSWORD:-rvcam12345}"
-AP_IP="192.168.4.1"
-PKG_DIR=com/rv1106/usbcam
+rm -rf out build && mkdir -p out build/gen build/classes build/res build/assets
 
-rm -rf out build && mkdir -p out build/gen/$PKG_DIR build/classes build/res
-
-# 1) 설정 상수
-cat > build/gen/$PKG_DIR/Config.java <<EOF
-package com.rv1106.usbcam;
-final class Config {
-    static final String AP_SSID = "$SSID";
-    static final String AP_SSID_PREFIX = "RvCam-";
-    static final String AP_PASSWORD = "$PW";
-    static final String AP_IP = "$AP_IP";
-}
-EOF
+# 1) 뷰어 페이지 (보드가 / 로 주는 것과 같은 파일)
+cp ../board/scannerd/web/viewer.html build/assets/
 
 # 2) 아이콘 (PNG 생성, PIL 이 없으면 res/ 에 있는 것을 그대로 쓴다)
 python - <<'PY' || echo "아이콘 생성 건너뜀 (PIL 없음)"
@@ -54,7 +39,7 @@ PY
 # 3) 리소스 컴파일 + 링크
 "$BT/aapt2$EXE" compile --dir res -o build/res.zip
 "$BT/aapt2$EXE" link -I "$JAR" --manifest AndroidManifest.xml \
-    --java build/gen -o build/base.apk build/res.zip --auto-add-overlay
+    -A build/assets --java build/gen -o build/base.apk build/res.zip --auto-add-overlay
 
 # 4) Java -> class -> dex
 javac -nowarn -Xlint:-options --release 8 -encoding UTF-8 \
